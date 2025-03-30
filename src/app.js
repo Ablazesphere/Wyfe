@@ -17,9 +17,7 @@ const app = express();
 mongoose
     .connect(process.env.MONGODB_URI, {
         useNewUrlParser: true,
-        useUnifiedTopology: true,
-        ssl: true,
-        tlsAllowInvalidCertificates: true  // Note: Use only in development
+        useUnifiedTopology: true
     })
     .then(() => console.log('Connected to MongoDB Atlas'))
     .catch(err => console.error('MongoDB connection error:', err));

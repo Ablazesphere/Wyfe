@@ -1,8 +1,8 @@
 // src/services/nlpService.js
 
+const axios = require('axios');
 const { format, parse, parseISO, addHours, addMinutes } = require('date-fns');
 const { zonedTimeToUtc, utcToZonedTime } = require('date-fns-tz');
-const axios = require('axios');
 const whatsappService = require('./whatsappService');
 const reminderService = require('./reminderService');
 
@@ -307,10 +307,27 @@ const createReminderFromResponse = async (user, response) => {
         user.conversationState = { stage: 'initial' };
     } catch (error) {
         console.error('Error creating reminder:', error);
-        await whatsappService.sendMessage(
-            user.phoneNumber,
-            "I had trouble setting your reminder. Please try again with a specific date and time, like 'tomorrow at 9am'."
-        );
+
+        // If the error was due to missing time, update conversation state
+        // to expect a follow-up with the time
+        if (error.message === 'Missing date or time for reminder' && response.content) {
+            // Set the state to follow up for datetime but preserve the content
+            user.conversationState = {
+                stage: 'followup_datetime',
+                content: response.content
+            };
+
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `What time would you like to be reminded to ${response.content}?`
+            );
+        } else {
+            // For other errors, use the generic message
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                "I had trouble setting your reminder. Please try again with a specific date and time, like 'tomorrow at 9am'."
+            );
+        }
     }
 };
 
@@ -354,6 +371,7 @@ const handleIncompleteReminder = async (user, response) => {
     }
 };
 
+
 /**
  * Handle datetime followup
  */
@@ -380,7 +398,6 @@ const handleDateTimeFollowup = async (user, response, conversationState) => {
         await handleUnclearDateTime(user, response, conversationState);
     }
 };
-
 
 /**
  * Handle content followup
