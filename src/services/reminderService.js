@@ -93,10 +93,96 @@ const deleteReminder = async (reminderId) => {
     }
 };
 
+/**
+ * Get reminders within a date range
+ * @param {String} userId - User ID
+ * @param {Date} startDate - Start date
+ * @param {Date} endDate - End date
+ * @returns {Promise<Array>} - Reminders in range
+ */
+const getRemindersInRange = async (userId, startDate, endDate) => {
+    try {
+        const reminders = await Reminder.find({
+            user: userId,
+            scheduledFor: { $gte: startDate, $lte: endDate },
+            status: { $ne: 'cancelled' }
+        }).sort({ scheduledFor: 1 });
+
+        return reminders;
+    } catch (error) {
+        console.error('Error fetching reminders in range:', error);
+        throw error;
+    }
+};
+
+/**
+ * Search reminders by content
+ * @param {String} userId - User ID
+ * @param {String} searchTerm - Content to search for
+ * @returns {Promise<Array>} - Matching reminders
+ */
+const searchRemindersByContent = async (userId, searchTerm) => {
+    try {
+        const regex = new RegExp(searchTerm, 'i');
+
+        const reminders = await Reminder.find({
+            user: userId,
+            content: regex,
+            status: { $ne: 'cancelled' }
+        }).sort({ scheduledFor: 1 });
+
+        return reminders;
+    } catch (error) {
+        console.error('Error searching reminders:', error);
+        throw error;
+    }
+};
+
+/**
+ * Get a reminder by ID
+ * @param {String} reminderId - Reminder ID
+ * @returns {Promise<Object>} - Reminder object
+ */
+const getReminderById = async (reminderId) => {
+    try {
+        const reminder = await Reminder.findById(reminderId);
+        return reminder;
+    } catch (error) {
+        console.error('Error fetching reminder by ID:', error);
+        throw error;
+    }
+};
+
+/**
+ * Update a reminder
+ * @param {String} reminderId - Reminder ID
+ * @param {Object} updateData - Fields to update
+ * @returns {Promise<Object>} - Updated reminder
+ */
+const updateReminder = async (reminderId, updateData) => {
+    try {
+        const reminder = await Reminder.findByIdAndUpdate(
+            reminderId,
+            updateData,
+            { new: true }
+        );
+
+        return reminder;
+    } catch (error) {
+        console.error('Error updating reminder:', error);
+        throw error;
+    }
+};
+
+// Add these methods to module.exports
 module.exports = {
     createReminder,
     getUserReminders,
     updateReminderStatus,
     getDueReminders,
-    deleteReminder
+    deleteReminder,
+    getRemindersInRange,
+    searchRemindersByContent,
+    getReminderById,
+    updateReminder
 };

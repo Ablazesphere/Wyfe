@@ -5,6 +5,10 @@ const { format, parse, parseISO, addHours, addMinutes } = require('date-fns');
 const { zonedTimeToUtc, utcToZonedTime } = require('date-fns-tz');
 const whatsappService = require('./whatsappService');
 const reminderService = require('./reminderService');
+const dateParserService = require('./dateParserService');
+const userPreferenceService = require('./userPreferenceService');
+const validationService = require('./validationService');
+
 
 /**
  * Process user message using OpenRouter LLM
@@ -109,58 +113,154 @@ const processUserMessage = async (user, messageText) => {
 /**
  * Get appropriate system prompt based on conversation state
  */
+/**
+ * Get appropriate system prompt based on conversation state
+ */
 const getSystemPrompt = (conversationState) => {
     switch (conversationState.stage) {
         case 'followup_datetime':
             return `You are a helpful reminder assistant. The user has previously requested a reminder for: "${conversationState.content}". 
-              You need to extract the date and time for this reminder.
-              ALWAYS format dates as YYYY-MM-DD (e.g., 2025-03-23) and times in 24-hour format as HH:MM (e.g., 09:00 or 14:30).
-              For relative dates like "tomorrow" or "next Monday", convert them to the actual date.
-              
-              Respond with JSON in this format: 
-              { 
-                "type": "reminder_datetime", 
-                "date": "YYYY-MM-DD", 
-                "time": "HH:MM", 
-                "timezone": "user timezone or UTC" 
-              }
-              
-              If you cannot determine the date or time, respond with: 
-              { 
-                "type": "unclear_datetime", 
-                "missing": ["date", "time", or both] 
-              }`;
+                You need to extract the date and time for this reminder.
+                
+                For dates, extract in one of these formats:
+                - YYYY-MM-DD (e.g., 2025-03-23) for specific dates
+                - "today", "tomorrow" for relative dates
+                - "next Monday", "next week" for day references
+                - "in 3 days", "in 2 weeks" for duration-based dates
+                
+                For times, extract in one of these formats:
+                - HH:MM in 24-hour format (e.g., 09:00 or 14:30) for specific times
+                - Or include a timeReference like "morning", "afternoon", "evening", "night"
+                
+                Respond with JSON in this format: 
+                { 
+                  "type": "reminder_datetime", 
+                  "date": "YYYY-MM-DD or relative date expression", 
+                  "time": "HH:MM or null if using timeReference", 
+                  "timeReference": "morning/afternoon/evening/night (if applicable)",
+                  "timezone": "user timezone or UTC" 
+                }
+                
+                If you cannot determine the date or time, respond with: 
+                { 
+                  "type": "unclear_datetime", 
+                  "missing": ["date", "time", or both] 
+                }`;
 
         case 'followup_content':
             return `You are a helpful reminder assistant. The user has previously specified a reminder for date: ${conversationState.date} and time: ${conversationState.time}.
-              You need to extract what the reminder is for.
-              Respond with JSON in this format: { "type": "reminder_content", "content": "what the reminder is for" }`;
+                You need to extract what the reminder is for.
+                Respond with JSON in this format: { "type": "reminder_content", "content": "what the reminder is for" }`;
+
+        case 'reschedule_confirmation':
+        case 'conflict_resolution':
+            return `You are a helpful reminder assistant. The user is responding to a question about a reminder.
+                
+                If the response indicates agreement (yes, sure, okay, fine, that works, go ahead, etc.), respond with:
+                { "type": "confirmation", "confirmed": true }
+                
+                If the response indicates disagreement (no, don't, I'll choose another time, let me pick another time, etc.), respond with:
+                { "type": "confirmation", "confirmed": false }
+                
+                For any other response type, try to determine if it's more likely an agreement or disagreement.`;
+
+        case 'delete_reminder_selection':
+            return `You are a helpful reminder assistant. The user is selecting a reminder to delete.
+                
+                If the response contains a number (e.g., "the first one", "number 2", "3"), respond with:
+                { "type": "selection", "index": [number-1] }
+                
+                If the response describes a reminder by content instead of number, respond with:
+                { "type": "selection", "content": "the content mentioned" }
+                
+                If you cannot determine which reminder they want to delete, respond with:
+                { "type": "unclear_selection", "message": "I couldn't determine which reminder you want to delete" }`;
+
+        case 'update_reminder_selection':
+            return `You are a helpful reminder assistant. The user is selecting a reminder to update.
+                
+                If the response contains a number (e.g., "the first one", "number 2", "3"), respond with:
+                { "type": "selection", "index": [number-1] }
+                
+                If the response describes a reminder by content instead of number, respond with:
+                { "type": "selection", "content": "the content mentioned" }
+                
+                If you cannot determine which reminder they want to update, respond with:
+                { "type": "unclear_selection", "message": "I couldn't determine which reminder you want to update" }`;
 
         case 'initial':
         default:
             return `You are a helpful reminder assistant. Extract reminder information from user messages.
-              ALWAYS format dates as YYYY-MM-DD (e.g., 2025-03-23) and times in 24-hour format as HH:MM (e.g., 09:00 or 14:30).
-              For relative dates like "tomorrow" or "next Monday", convert them to the actual date.
-              Today's date is ${format(new Date(), 'yyyy-MM-dd')}.
-              
-              Respond with JSON in this format:
-              { 
-                "type": "reminder", 
-                "content": "what the reminder is for", 
-                "date": "YYYY-MM-DD", 
-                "time": "HH:MM",
-                "recurrence": "none|daily|weekly|monthly" 
-              }
-              If reminder information is incomplete, respond with: 
-              { 
-                "type": "incomplete_reminder", 
-                "content": "what you understood of the content or null", 
-                "date": "YYYY-MM-DD or null", 
-                "time": "HH:MM or null",
-                "missing": ["content", "date", "time"] 
-              }
-              If the message is not a reminder request, respond with:
-              { "type": "not_reminder", "content": "brief description of user's message" }`;
+                
+                For dates, extract in one of these formats:
+                - YYYY-MM-DD (e.g., 2025-03-23) for specific dates
+                - "today", "tomorrow" for relative dates
+                - "next Monday", "next week" for day references
+                - "in 3 days", "in 2 weeks" for duration-based dates
+                
+                For times, extract in one of these formats:
+                - HH:MM in 24-hour format (e.g., 09:00 or 14:30) for specific times
+                - Or include a timeReference like "morning", "afternoon", "evening", "night"
+                
+                Today's date is ${format(new Date(), 'yyyy-MM-dd')}.
+                
+                If the message is asking to create a reminder, respond with:
+                { 
+                  "type": "reminder", 
+                  "content": "what the reminder is for", 
+                  "date": "YYYY-MM-DD or relative date expression", 
+                  "time": "HH:MM or null if using timeReference", 
+                  "timeReference": "morning/afternoon/evening/night (if applicable)",
+                  "recurrence": "none|daily|weekly|monthly" 
+                }
+                
+                If reminder information is incomplete, respond with: 
+                { 
+                  "type": "incomplete_reminder", 
+                  "content": "what you understood of the content or null", 
+                  "date": "extracted date or null", 
+                  "time": "extracted time or null",
+                  "timeReference": "extracted time reference or null",
+                  "missing": ["content", "date", "time"] 
+                }
+                
+                If the message is asking to see, list, or view reminders, respond with:
+                { "type": "list_reminders", "filter": "all|today|week|specific content" }
+                
+                If the message is asking to delete or cancel a reminder, respond with:
+                { "type": "delete_reminder", "identifierType": "content|id", "identifier": "the content or id" }
+                
+                If the message is asking to update or change a reminder, respond with:
+                { "type": "update_reminder", "identifierType": "content|id", "identifier": "the content or id", "updates": {"date": "new date", "time": "new time", "content": "new content"} }
+                
+                If the message is about setting or getting user preferences, respond with:
+                { 
+                  "type": "preference", 
+                  "action": "set|get", 
+                  "preferenceType": "timezone|time_reference|notification_method", 
+                  "value": "the preference value or reference object" 
+                }
+                
+                Examples of preference queries:
+                - "What time is morning for me?" → { "type": "preference", "action": "get", "preferenceType": "time_reference", "value": {"reference": "morning"} }
+                - "What time has been set for evening?" → { "type": "preference", "action": "get", "preferenceType": "time_reference", "value": {"reference": "evening"} }
+                - "What's my current timezone?" → { "type": "preference", "action": "get", "preferenceType": "timezone", "value": null }
+                - "Show me my time preferences" → { "type": "preference", "action": "get", "preferenceType": "time_reference", "value": {"reference": "all"} }
+                
+                For time references, parse as:
+                { 
+                  "type": "preference", 
+                  "action": "set", 
+                  "preferenceType": "time_reference", 
+                  "value": {
+                    "reference": "morning|afternoon|evening|night", 
+                    "hour": 9, 
+                    "minute": 0
+                  }
+                }
+                
+                If the message is not a reminder-related request, respond with:
+                { "type": "not_reminder", "content": "brief description of user's message" }`;
     }
 };
 
@@ -175,6 +275,18 @@ const handleNlpResponse = async (user, response, conversationState) => {
         case 'reminder':
             // Complete reminder information
             await createReminderFromResponse(user, response);
+            break;
+
+        case 'list_reminders':
+            await handleListReminders(user, response);
+            break;
+
+        case 'delete_reminder':
+            await handleDeleteReminder(user, response);
+            break;
+
+        case 'update_reminder':
+            await handleUpdateReminder(user, response);
             break;
 
         case 'incomplete_reminder':
@@ -206,6 +318,19 @@ const handleNlpResponse = async (user, response, conversationState) => {
             await handleNonReminderMessage(user, response);
             break;
 
+        case 'preference':
+            await userPreferenceService.handlePreferenceCommand(user, response);
+            break;
+
+        case 'confirmation':
+            // This is a response to a previous question requiring confirmation
+            if (conversationState.stage === 'reschedule_confirmation') {
+                await handleRescheduleConfirmation(user, response);
+            } else if (conversationState.stage === 'conflict_resolution') {
+                await handleConflictResolution(user, response);
+            }
+            break;
+
         default:
             // Unrecognized response type
             await whatsappService.sendMessage(
@@ -221,68 +346,467 @@ const handleNlpResponse = async (user, response, conversationState) => {
 };
 
 /**
+ * Handle response to rescheduling suggestion
+ */
+const handleRescheduleConfirmation = async (user, response) => {
+    const { content, suggestedDate } = user.conversationState;
+
+    if (response.confirmed) {
+        // User accepted the suggested rescheduling
+        try {
+            const reminder = await reminderService.createReminder({
+                user: user._id,
+                content: content,
+                scheduledFor: new Date(suggestedDate),
+                recurrence: 'none',
+                notificationMethod: user.preferredNotificationMethod
+            });
+
+            // Format date for user-friendly message
+            const scheduledDate = dateParserService.formatDateForDisplay(new Date(suggestedDate));
+
+            // Send confirmation message
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `✅ Reminder set for ${scheduledDate}: "${content}"`
+            );
+        } catch (error) {
+            console.error('Error creating rescheduled reminder:', error);
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                "I had trouble setting your reminder. Please try again."
+            );
+        }
+    } else {
+        // User rejected the suggestion
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            "No problem. Please specify a different date and time for your reminder."
+        );
+
+        // Update conversation state to await new date/time
+        user.conversationState = {
+            stage: 'followup_datetime',
+            content: content
+        };
+
+        return;
+    }
+
+    // Reset conversation state
+    user.conversationState = { stage: 'initial' };
+};
+
+/**
+ * Handle response to conflict resolution
+ */
+const handleConflictResolution = async (user, response) => {
+    const { content, scheduledFor } = user.conversationState;
+
+    if (response.confirmed) {
+        // User wants to schedule despite the conflict
+        try {
+            const reminder = await reminderService.createReminder({
+                user: user._id,
+                content: content,
+                scheduledFor: new Date(scheduledFor),
+                recurrence: 'none',
+                notificationMethod: user.preferredNotificationMethod
+            });
+
+            // Format date for user-friendly message
+            const scheduledDate = dateParserService.formatDateForDisplay(new Date(scheduledFor));
+
+            // Send confirmation message
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `✅ Reminder set for ${scheduledDate}: "${content}"`
+            );
+        } catch (error) {
+            console.error('Error creating reminder with conflict:', error);
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                "I had trouble setting your reminder. Please try again."
+            );
+        }
+    } else {
+        // User wants to avoid the conflict
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            "No problem. Please specify a different date and time for your reminder."
+        );
+
+        // Update conversation state to await new date/time
+        user.conversationState = {
+            stage: 'followup_datetime',
+            content: content
+        };
+
+        return;
+    }
+
+    // Reset conversation state
+    user.conversationState = { stage: 'initial' };
+};
+
+/**
+ * Handle request to list reminders
+ */
+const handleListReminders = async (user, response) => {
+    try {
+        const filter = response.filter || 'all';
+        const now = new Date();
+        let reminders;
+
+        // Apply filtering
+        if (filter === 'today') {
+            const endOfDay = new Date(now);
+            endOfDay.setHours(23, 59, 59, 999);
+
+            reminders = await reminderService.getRemindersInRange(
+                user._id,
+                now,
+                endOfDay
+            );
+        } else if (filter === 'week') {
+            const endOfWeek = new Date(now);
+            endOfWeek.setDate(now.getDate() + 7);
+
+            reminders = await reminderService.getRemindersInRange(
+                user._id,
+                now,
+                endOfWeek
+            );
+        } else if (filter === 'all') {
+            reminders = await reminderService.getUserReminders(user._id);
+        } else {
+            // Content-based filter
+            reminders = await reminderService.searchRemindersByContent(
+                user._id,
+                filter
+            );
+        }
+
+        if (reminders.length === 0) {
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `You don't have any ${filter !== 'all' ? filter + ' ' : ''}reminders.`
+            );
+            return;
+        }
+
+        // Format reminders for display
+        let message = `Here are your ${filter !== 'all' ? filter + ' ' : ''}reminders:\n\n`;
+
+        reminders.forEach((reminder, index) => {
+            const date = dateParserService.formatDateForDisplay(reminder.scheduledFor);
+            message += `${index + 1}. "${reminder.content}" - ${date}\n`;
+        });
+
+        // Add instructions for management
+        message += "\nTo cancel a reminder, say: 'Cancel my [reminder content]'";
+
+        await whatsappService.sendMessage(user.phoneNumber, message);
+    } catch (error) {
+        console.error('Error listing reminders:', error);
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            "I had trouble retrieving your reminders. Please try again."
+        );
+    }
+};
+
+/**
+ * Handle request to delete a reminder
+ */
+const handleDeleteReminder = async (user, response) => {
+    try {
+        const { identifierType, identifier } = response;
+        let reminder;
+
+        if (identifierType === 'content') {
+            // Find by content similarity
+            const reminders = await reminderService.searchRemindersByContent(
+                user._id,
+                identifier
+            );
+
+            if (reminders.length === 0) {
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    `I couldn't find a reminder about "${identifier}".`
+                );
+                return;
+            } else if (reminders.length > 1) {
+                // Multiple matches found, ask user to be more specific
+                let message = "I found multiple matching reminders. Please specify which one to cancel:\n\n";
+
+                reminders.forEach((reminder, index) => {
+                    const date = dateParserService.formatDateForDisplay(reminder.scheduledFor);
+                    message += `${index + 1}. "${reminder.content}" - ${date}\n`;
+                });
+
+                // Set conversation state for follow-up
+                user.conversationState = {
+                    stage: 'delete_reminder_selection',
+                    reminders: reminders.map(r => r._id.toString())
+                };
+
+                await whatsappService.sendMessage(user.phoneNumber, message);
+                return;
+            }
+
+            // Single match found
+            reminder = reminders[0];
+        } else if (identifierType === 'id') {
+            // Direct ID reference (from a previous list or selection)
+            reminder = await reminderService.getReminderById(identifier);
+
+            if (!reminder || reminder.user.toString() !== user._id.toString()) {
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    "I couldn't find that reminder."
+                );
+                return;
+            }
+        }
+
+        // Delete the reminder
+        await reminderService.deleteReminder(reminder._id);
+
+        // Confirm deletion
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            `✅ Reminder "${reminder.content}" has been cancelled.`
+        );
+
+        // Reset conversation state
+        user.conversationState = { stage: 'initial' };
+    } catch (error) {
+        console.error('Error deleting reminder:', error);
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            "I had trouble cancelling that reminder. Please try again."
+        );
+    }
+};
+
+/**
+ * Handle request to update a reminder
+ */
+const handleUpdateReminder = async (user, response) => {
+    try {
+        const { identifierType, identifier, updates } = response;
+        let reminder;
+
+        if (identifierType === 'content') {
+            // Find by content similarity
+            const reminders = await reminderService.searchRemindersByContent(
+                user._id,
+                identifier
+            );
+
+            if (reminders.length === 0) {
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    `I couldn't find a reminder about "${identifier}".`
+                );
+                return;
+            } else if (reminders.length > 1) {
+                // Multiple matches found, ask user to be more specific
+                let message = "I found multiple matching reminders. Please specify which one to update:\n\n";
+
+                reminders.forEach((reminder, index) => {
+                    const date = dateParserService.formatDateForDisplay(reminder.scheduledFor);
+                    message += `${index + 1}. "${reminder.content}" - ${date}\n`;
+                });
+
+                // Set conversation state for follow-up with the update info
+                user.conversationState = {
+                    stage: 'update_reminder_selection',
+                    reminders: reminders.map(r => r._id.toString()),
+                    updates
+                };
+
+                await whatsappService.sendMessage(user.phoneNumber, message);
+                return;
+            }
+
+            // Single match found
+            reminder = reminders[0];
+        } else if (identifierType === 'id') {
+            // Direct ID reference (from a previous list or selection)
+            reminder = await reminderService.getReminderById(identifier);
+
+            if (!reminder || reminder.user.toString() !== user._id.toString()) {
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    "I couldn't find that reminder."
+                );
+                return;
+            }
+        }
+
+        // Process updates
+        let updatedFields = {};
+
+        if (updates.content) {
+            updatedFields.content = updates.content;
+        }
+
+        if (updates.date || updates.time || updates.timeReference) {
+            // Parse new date/time if provided
+            try {
+                const dateTimeInfo = {
+                    date: updates.date || format(reminder.scheduledFor, 'yyyy-MM-dd'),
+                    time: updates.time || format(reminder.scheduledFor, 'HH:mm'),
+                    timeReference: updates.timeReference
+                };
+
+                const newDateTime = dateParserService.parseDateTime(
+                    dateTimeInfo,
+                    user.timeZone || 'Asia/Kolkata'
+                );
+
+                updatedFields.scheduledFor = newDateTime;
+            } catch (error) {
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    "I couldn't understand the new date or time. Please try again."
+                );
+                return;
+            }
+        }
+
+        // Update the reminder
+        const updatedReminder = await reminderService.updateReminder(
+            reminder._id,
+            updatedFields
+        );
+
+        // Confirm update
+        const formattedDate = dateParserService.formatDateForDisplay(updatedReminder.scheduledFor);
+
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            `✅ Reminder updated: "${updatedReminder.content}" - ${formattedDate}`
+        );
+
+        // Reset conversation state
+        user.conversationState = { stage: 'initial' };
+    } catch (error) {
+        console.error('Error updating reminder:', error);
+        await whatsappService.sendMessage(
+            user.phoneNumber,
+            "I had trouble updating that reminder. Please try again."
+        );
+    }
+};
+
+/**
  * Create a reminder from complete information with proper timezone handling
  */
 const createReminderFromResponse = async (user, response) => {
     try {
-        // Ensure date and time are valid before proceeding
-        if (!response.date || !response.time) {
-            throw new Error('Missing date or time for reminder');
-        }
+        // Validate content
+        const contentValidation = validationService.validateContent(response.content);
+        if (!contentValidation.valid) {
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                contentValidation.message
+            );
 
-        // Double check that content exists
-        if (!response.content) {
-            console.error('Missing content for reminder');
-            throw new Error('Reminder content is required');
-        }
-
-        // Get user's timezone
-        const userTimeZone = user.timeZone || 'Asia/Kolkata';  // Default to India timezone
-
-        // Properly parse the date and time with timezone
-        let scheduledDateTime;
-        try {
-            console.log(`Parsing date: ${response.date} and time: ${response.time} in timezone: ${userTimeZone}`);
-
-            // Create date parts
-            const [hours, minutes] = response.time.split(':').map(Number);
-            const [year, month, day] = response.date.split('-').map(Number);
-
-            // Create date in user's local timezone
-            // Note: month is 0-indexed in JavaScript Date
-            const localDate = new Date(year, month - 1, day, hours, minutes);
-            console.log(`Created local date: ${localDate.toString()}`);
-
-            // No timezone conversion needed - we're already creating the date
-            // in the user's timezone context
-            scheduledDateTime = localDate;
-
-            // Validate the date
-            if (isNaN(scheduledDateTime.valueOf())) {
-                throw new Error('Invalid date format');
+            if (contentValidation.suggestion && contentValidation.suggestion.action === 'shorten') {
+                // Set conversation state to await shorter content
+                user.conversationState = {
+                    stage: 'followup_content',
+                    date: response.date,
+                    time: response.time,
+                    timeReference: response.timeReference
+                };
             }
 
-            console.log(`Final scheduled date time: ${scheduledDateTime.toString()}`);
+            return;
+        }
 
-            // Check if the date is in the past
-            const now = new Date();
-            if (scheduledDateTime < now) {
-                // If it's today and the time has passed, move to tomorrow
-                const today = new Date();
-                if (scheduledDateTime.getDate() === today.getDate() &&
-                    scheduledDateTime.getMonth() === today.getMonth() &&
-                    scheduledDateTime.getFullYear() === today.getFullYear()) {
+        // Get the user's timezone
+        const userTimeZone = user.timeZone || 'Asia/Kolkata';
 
-                    scheduledDateTime.setDate(scheduledDateTime.getDate() + 1);
-                    console.log(`Date was today but in past, adjusted to tomorrow: ${scheduledDateTime.toString()}`);
-                }
+        // Parse the date and time using our enhanced parser
+        let scheduledDateTime;
+        try {
+            // Prepare the date/time info for the parser
+            const dateTimeInfo = {
+                date: response.date,
+                time: response.time,
+                timeReference: response.timeReference
+            };
+
+            scheduledDateTime = await dateParserService.parseDateTime(dateTimeInfo, user._id, userTimeZone);
+
+            console.log(`Parsed date: ${scheduledDateTime.toISOString()}`);
+
+            if (isNaN(scheduledDateTime.valueOf())) {
+                throw new Error('Invalid date');
             }
         } catch (dateError) {
             console.error('Error parsing date:', dateError);
-            throw new Error('Could not parse reminder date and time');
+            throw new Error('Could not understand the date and time');
         }
 
-        // Create the reminder with validated date
+        // Validate the date
+        const dateValidation = validationService.validateDate(scheduledDateTime);
+        if (!dateValidation.valid) {
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                dateValidation.message
+            );
+
+            // If there's a suggestion for rescheduling
+            if (dateValidation.suggestion && dateValidation.suggestion.action === 'reschedule') {
+                // Set conversation state to await rescheduling confirmation
+                user.conversationState = {
+                    stage: 'reschedule_confirmation',
+                    content: response.content,
+                    suggestedDate: dateValidation.suggestion.date
+                };
+
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    dateValidation.suggestion.message
+                );
+            }
+
+            return;
+        } else if (dateValidation.adjusted) {
+            // If the date was slightly adjusted
+            scheduledDateTime = dateValidation.date;
+        }
+
+        // Check for conflicts
+        const conflictCheck = await validationService.checkConflicts(
+            user._id,
+            scheduledDateTime
+        );
+
+        if (conflictCheck.hasConflict) {
+            // Set conversation state to await conflict resolution
+            user.conversationState = {
+                stage: 'conflict_resolution',
+                content: response.content,
+                scheduledFor: scheduledDateTime,
+                conflicts: conflictCheck.conflicts.map(c => c._id)
+            };
+
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                conflictCheck.message
+            );
+
+            return;
+        }
+
+        // Create the reminder
         const reminder = await reminderService.createReminder({
             user: user._id,
             content: response.content,
@@ -292,10 +816,7 @@ const createReminderFromResponse = async (user, response) => {
         });
 
         // Format date for user-friendly message
-        // Use a specific format string that won't cause issues
-        const formattedDate = format(scheduledDateTime, 'EEEE, MMMM do');
-        const formattedTime = format(scheduledDateTime, 'h:mm a');
-        const scheduledDate = `${formattedDate} at ${formattedTime}`;
+        const scheduledDate = dateParserService.formatDateForDisplay(scheduledDateTime);
 
         // Send confirmation message
         await whatsappService.sendMessage(
@@ -308,24 +829,29 @@ const createReminderFromResponse = async (user, response) => {
     } catch (error) {
         console.error('Error creating reminder:', error);
 
-        // If the error was due to missing time, update conversation state
-        // to expect a follow-up with the time
-        if (error.message === 'Missing date or time for reminder' && response.content) {
-            // Set the state to follow up for datetime but preserve the content
+        // Handle specific errors with helpful messages
+        if (error.message === 'Could not understand the date and time') {
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                "I couldn't understand when you want to be reminded. Please try specifying a date and time like 'tomorrow at 9am' or 'next Monday evening'."
+            );
+        } else if (error.message === 'Reminder content is required') {
+            // Update conversation state to ask for content
             user.conversationState = {
-                stage: 'followup_datetime',
-                content: response.content
+                stage: 'followup_content',
+                date: response.date,
+                time: response.time,
+                timeReference: response.timeReference
             };
 
             await whatsappService.sendMessage(
                 user.phoneNumber,
-                `What time would you like to be reminded to ${response.content}?`
+                "What would you like to be reminded about?"
             );
         } else {
-            // For other errors, use the generic message
             await whatsappService.sendMessage(
                 user.phoneNumber,
-                "I had trouble setting your reminder. Please try again with a specific date and time, like 'tomorrow at 9am'."
+                "I had trouble setting your reminder. Please try again."
             );
         }
     }
