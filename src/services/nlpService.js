@@ -334,6 +334,10 @@ const handleNlpResponse = async (user, response, conversationState) => {
             }
             break;
 
+        case 'date_clarification':
+            await handleDateClarification(user, response, conversationState);
+            break;
+
         default:
             // Unrecognized response type
             await whatsappService.sendMessage(
@@ -346,6 +350,33 @@ const handleNlpResponse = async (user, response, conversationState) => {
 
     // Save updated user with new conversation state
     await user.save();
+};
+
+
+const handleDateClarification = async (user, response, conversationState) => {
+    // Check if the response indicates today or next week
+    const isToday = response.content?.toLowerCase().includes('today') ||
+        response.content?.toLowerCase().includes('this');
+
+    const isNextWeek = response.content?.toLowerCase().includes('next');
+
+    // Choose the appropriate date
+    let scheduledDate;
+    if (isNextWeek) {
+        scheduledDate = conversationState.nextWeekOption;
+    } else {
+        scheduledDate = conversationState.todayOption;
+    }
+
+    // Create the reminder with the clarified date
+    await createReminderFromResponse(user, {
+        type: 'reminder',
+        content: conversationState.content,
+        date: format(scheduledDate, 'yyyy-MM-dd'),
+        time: conversationState.time,
+        timeReference: conversationState.timeReference,
+        recurrence: 'none'
+    });
 };
 
 /**
@@ -503,7 +534,7 @@ const handleListReminders = async (user, response) => {
 
         reminders.forEach((reminder, index) => {
             const date = dateParserService.formatDateForDisplay(reminder.scheduledFor);
-            message += `${index + 1}. "${reminder.content}" - ${date}\n`;
+            message += `${index + 1}. ${reminder.content} - ${date}\n`;
         });
 
         // Add instructions for management
@@ -595,7 +626,7 @@ const handleDeleteReminder = async (user, response) => {
 };
 
 /**
- * Handle request to update a reminder
+ * Handle request to update a reminder with improved content matching
  */
 const handleUpdateReminder = async (user, response) => {
     try {
@@ -603,18 +634,72 @@ const handleUpdateReminder = async (user, response) => {
         let reminder;
 
         if (identifierType === 'content') {
-            // Find by content similarity
+            // Use the enhanced similarity search from before
             const reminders = await reminderService.searchRemindersByContent(
                 user._id,
                 identifier
             );
 
             if (reminders.length === 0) {
-                await whatsappService.sendMessage(
-                    user.phoneNumber,
-                    `I couldn't find a reminder about "${identifier}".`
-                );
-                return;
+                // If direct search fails, try a more lenient search
+                const allReminders = await reminderService.getUserReminders(user._id);
+
+                // Try to find a fuzzy match
+                const possibleMatches = allReminders.filter(r => {
+                    const content = r.content.toLowerCase();
+                    const searchTerm = identifier.toLowerCase();
+
+                    // Calculate word similarity
+                    const contentWords = content.split(/\s+/);
+                    const searchWords = searchTerm.split(/\s+/);
+
+                    // Check for word overlap, including stemming
+                    let matchCount = 0;
+                    for (const searchWord of searchWords) {
+                        if (contentWords.some(word =>
+                            word.includes(searchWord) ||
+                            searchWord.includes(word) ||
+                            // Remove common endings for comparison
+                            word.replace(/ing$|s$|ed$/, '') === searchWord.replace(/ing$|s$|ed$/, '')
+                        )) {
+                            matchCount++;
+                        }
+                    }
+
+                    // Consider it a match if at least half the words match
+                    return matchCount >= Math.ceil(searchWords.length / 2);
+                });
+
+                if (possibleMatches.length === 0) {
+                    await whatsappService.sendMessage(
+                        user.phoneNumber,
+                        `I couldn't find a reminder about "${identifier}".`
+                    );
+                    return;
+                }
+
+                // Use the fuzzy matches
+                if (possibleMatches.length === 1) {
+                    reminder = possibleMatches[0];
+                } else {
+                    // Multiple matches found, ask user to be more specific
+                    let message = "I found multiple matching reminders. Please specify which one to update:\n\n";
+
+                    possibleMatches.forEach((reminder, index) => {
+                        const date = dateParserService.formatDateForDisplay(reminder.scheduledFor);
+                        message += `${index + 1}. "${reminder.content}" - ${date}\n`;
+                    });
+
+                    // Set conversation state for follow-up
+                    user.conversationState = {
+                        stage: 'update_reminder_selection',
+                        reminders: possibleMatches.map(r => r._id.toString()),
+                        updates
+                    };
+
+                    await whatsappService.sendMessage(user.phoneNumber, message);
+                    return;
+                }
             } else if (reminders.length > 1) {
                 // Multiple matches found, ask user to be more specific
                 let message = "I found multiple matching reminders. Please specify which one to update:\n\n";
@@ -666,8 +751,9 @@ const handleUpdateReminder = async (user, response) => {
                     timeReference: updates.timeReference
                 };
 
-                const newDateTime = dateParserService.parseDateTime(
+                const newDateTime = await dateParserService.parseDateTime(
                     dateTimeInfo,
+                    user._id,
                     user.timeZone || 'Asia/Kolkata'
                 );
 
@@ -719,7 +805,18 @@ const createReminderFromResponse = async (user, response) => {
                 contentValidation.message
             );
 
-            if (contentValidation.suggestion && contentValidation.suggestion.action === 'shorten') {
+            if (contentValidation.reason === "content_is_time_reference") {
+                // Set conversation state to await content, but preserve date/time info
+                user.conversationState = {
+                    stage: 'followup_content',
+                    date: response.date,
+                    time: response.time,
+                    timeReference: response.timeReference
+                };
+                await user.save();
+            }
+
+            else if (contentValidation.suggestion && contentValidation.suggestion.action === 'shorten') {
                 // Set conversation state to await shorter content
                 user.conversationState = {
                     stage: 'followup_content',
@@ -825,6 +922,30 @@ const createReminderFromResponse = async (user, response) => {
                 user.phoneNumber,
                 conflictCheck.message
             );
+
+            return;
+        }
+
+        // Add this to createReminderFromResponse before creating the reminder
+        const today = new Date();
+        if (format(scheduledDateTime, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd') &&
+            dateParserService.isDayOfWeekReference(response.date)) {
+
+            // Ask for clarification
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `Did you mean today (${format(today, 'EEEE, MMMM do')}) or next ${format(today, 'EEEE')}?`
+            );
+
+            // Update conversation state for clarification
+            user.conversationState = {
+                stage: 'date_clarification',
+                content: response.content,
+                todayOption: today,
+                nextWeekOption: addDays(today, 7),
+                time: response.time,
+                timeReference: response.timeReference
+            };
 
             return;
         }

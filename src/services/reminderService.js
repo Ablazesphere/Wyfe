@@ -123,15 +123,47 @@ const getRemindersInRange = async (userId, startDate, endDate) => {
  */
 const searchRemindersByContent = async (userId, searchTerm) => {
     try {
-        const regex = new RegExp(searchTerm, 'i');
+        // Clean up the search term
+        const cleanTerm = searchTerm.toLowerCase().trim();
 
-        const reminders = await Reminder.find({
+        // Get all reminders for the user
+        const allReminders = await Reminder.find({
             user: userId,
-            content: regex,
             status: { $ne: 'cancelled' }
-        }).sort({ scheduledFor: 1 });
+        });
 
-        return reminders;
+        // Filter reminders using a more flexible matching algorithm
+        const matchedReminders = allReminders.filter(reminder => {
+            const content = reminder.content.toLowerCase();
+
+            // Direct substring match
+            if (content.includes(cleanTerm)) {
+                return true;
+            }
+
+            // Check for similar words (basic stemming)
+            const contentWords = content.split(/\s+/);
+            const searchWords = cleanTerm.split(/\s+/);
+
+            // Check if most search words appear in content
+            const matchingWords = searchWords.filter(searchWord =>
+                contentWords.some(contentWord =>
+                    contentWord.includes(searchWord) ||
+                    searchWord.includes(contentWord) ||
+                    // Handle singular/plural by checking for common endings
+                    (contentWord.endsWith('s') && searchWord === contentWord.slice(0, -1)) ||
+                    (searchWord.endsWith('s') && contentWord === searchWord.slice(0, -1)) ||
+                    // Handle gerund forms (ing)
+                    (contentWord.endsWith('ing') && searchWord === contentWord.replace(/ing$/, '')) ||
+                    (searchWord.endsWith('ing') && contentWord === searchWord.replace(/ing$/, ''))
+                )
+            );
+
+            // Return true if at least 60% of search words match
+            return matchingWords.length >= Math.ceil(searchWords.length * 0.6);
+        });
+
+        return matchedReminders;
     } catch (error) {
         console.error('Error searching reminders:', error);
         throw error;

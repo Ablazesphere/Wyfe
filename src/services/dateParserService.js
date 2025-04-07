@@ -59,12 +59,12 @@ class DateParserService {
     }
 
     /**
-     * Parse date and time from LLM response and convert to user's timezone
-     * @param {Object} dateTimeInfo - The date and time information from LLM
-     * @param {String} userId - User ID for preferences
-     * @param {String} timezone - The user's timezone
-     * @returns {Date} - JavaScript Date object in user's timezone
-     */
+ * Parse date and time from LLM response and convert to user's timezone
+ * @param {Object} dateTimeInfo - The date and time information from LLM
+ * @param {String} userId - User ID for preferences
+ * @param {String} timezone - The user's timezone
+ * @returns {Date} - JavaScript Date object in user's timezone
+ */
     async parseDateTime(dateTimeInfo, userId, timezone = 'Asia/Kolkata') {
         let { date, time, timeReference, relativeTime } = dateTimeInfo;
         const now = new Date();
@@ -87,6 +87,14 @@ class DateParserService {
         }
 
         try {
+            // Validate date string first if it's not a relative date
+            if (date && !this.isRelativeDate(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+                const validation = this.validateDateString(date);
+                if (!validation.valid) {
+                    throw new Error(validation.message || 'Invalid date');
+                }
+            }
+
             // Handle relative time expressions first (priority over other parsing)
             if (relativeTime) {
                 const { unit, amount } = relativeTime;
@@ -98,6 +106,8 @@ class DateParserService {
                     parsedDate = addHours(now, amount);
                 } else if (unit === 'days' || unit === 'day') {
                     parsedDate = addDays(now, amount);
+                } else {
+                    throw new Error(`Unsupported time unit: ${unit}`);
                 }
 
                 console.log(`Parsed relative time: ${amount} ${unit}, result: ${parsedDate}`);
@@ -109,8 +119,13 @@ class DateParserService {
                     // If timezone is valid, apply it
                     if (timezone) {
                         try {
-                            parsedDate = utcToZonedTime(parsedDate, timezone);
-                            console.log(`After timezone conversion: ${parsedDate}`);
+                            // Only apply if the function exists
+                            if (typeof utcToZonedTime === 'function') {
+                                parsedDate = utcToZonedTime(parsedDate, timezone);
+                                console.log(`After timezone conversion: ${parsedDate}`);
+                            } else {
+                                console.log('Timezone conversion function not available, skipping');
+                            }
                         } catch (tzError) {
                             console.error('Error applying timezone:', tzError);
                             console.log('Using parsed date without timezone conversion');
@@ -141,9 +156,13 @@ class DateParserService {
                 if (parsedDate && !isNaN(parsedDate.getTime())) {
                     if (timezone) {
                         try {
-                            console.log(`Using timezone: ${timezone}`);
-                            parsedDate = utcToZonedTime(parsedDate, timezone);
-                            console.log(`After timezone conversion: ${parsedDate}`);
+                            if (typeof utcToZonedTime === 'function') {
+                                console.log(`Using timezone: ${timezone}`);
+                                parsedDate = utcToZonedTime(parsedDate, timezone);
+                                console.log(`After timezone conversion: ${parsedDate}`);
+                            } else {
+                                console.log('Timezone conversion function not available, skipping');
+                            }
                         } catch (tzError) {
                             console.error('Error applying timezone:', tzError);
                         }
@@ -160,6 +179,9 @@ class DateParserService {
                 // If it's a full date string (YYYY-MM-DD)
                 if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
                     parsedDate = parseISO(date);
+                    if (isNaN(parsedDate.getTime())) {
+                        throw new Error('Invalid date format');
+                    }
                 }
                 // Handle relative dates
                 else if (date.toLowerCase() === 'today') {
@@ -178,6 +200,8 @@ class DateParserService {
                         parsedDate = addWeeks(now, 1);
                     } else if (dayName === 'month') {
                         parsedDate = addMonths(now, 1);
+                    } else {
+                        throw new Error(`I don't understand what you mean by "next ${dayName}"`);
                     }
                 }
                 else if (/^in\s+(\d+)\s+(\w+)$/i.test(date)) {
@@ -195,6 +219,8 @@ class DateParserService {
                         parsedDate = addMinutes(now, amount);
                     } else if (unit === 'hour' || unit === 'hours') {
                         parsedDate = addHours(now, amount);
+                    } else {
+                        throw new Error(`I don't understand the time unit "${unit}"`);
                     }
                 }
                 else if (/^this\s+(\w+)$/i.test(date)) {
@@ -221,6 +247,70 @@ class DateParserService {
                         parsedDate = now; // This week means current week
                     } else if (dayName === 'month') {
                         parsedDate = now; // This month means current month
+                    } else {
+                        throw new Error(`I don't understand what you mean by "this ${dayName}"`);
+                    }
+                }
+                // Try to parse specific date from natural language (e.g., "April 15th")
+                else {
+                    try {
+                        // Try to extract month name and day
+                        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+                            'july', 'august', 'september', 'october', 'november', 'december'];
+                        let foundMonth = false;
+                        let monthIndex = -1;
+                        let day = null;
+
+                        for (let i = 0; i < monthNames.length; i++) {
+                            if (date.toLowerCase().includes(monthNames[i])) {
+                                foundMonth = true;
+                                monthIndex = i;
+                                break;
+                            }
+                        }
+
+                        if (foundMonth) {
+                            // Try to extract the day
+                            const dayMatch = date.match(/(\d+)(?:st|nd|rd|th)?/);
+                            if (dayMatch) {
+                                day = parseInt(dayMatch[1]);
+
+                                // Validate day for this month
+                                let maxDay;
+                                if ([3, 5, 8, 10].includes(monthIndex)) { // Apr, Jun, Sep, Nov
+                                    maxDay = 30;
+                                } else if (monthIndex === 1) { // Feb
+                                    // Simple leap year check
+                                    const year = now.getFullYear();
+                                    maxDay = (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) ? 29 : 28;
+                                } else {
+                                    maxDay = 31;
+                                }
+
+                                if (day < 1 || day > maxDay) {
+                                    throw new Error(`There's no ${day}${this.getOrdinalSuffix(day)} day in ${monthNames[monthIndex].charAt(0).toUpperCase() + monthNames[monthIndex].slice(1)}`);
+                                }
+
+                                // Create date object - use current year unless in the past
+                                let year = now.getFullYear();
+                                const tempDate = new Date(year, monthIndex, day);
+
+                                // If the date is in the past, assume next year
+                                if (tempDate < now) {
+                                    year++;
+                                    tempDate.setFullYear(year);
+                                }
+
+                                parsedDate = tempDate;
+                            }
+                        }
+
+                        if (!parsedDate) {
+                            throw new Error(`I couldn't understand the date "${date}"`);
+                        }
+                    } catch (nlpError) {
+                        console.error('Error parsing natural language date:', nlpError);
+                        throw new Error(`I couldn't understand the date "${date}". Please try a format like "tomorrow" or "next Monday".`);
                     }
                 }
             }
@@ -230,6 +320,7 @@ class DateParserService {
                 parsedDate = new Date();
                 console.log('Using current date as fallback');
             }
+
             // Handle time
             if (time) {
                 // If it's a HH:MM format
@@ -237,9 +328,28 @@ class DateParserService {
                     const [hours, minutes] = time.split(':').map(Number);
                     parsedDate = setHours(parsedDate, hours);
                     parsedDate = setMinutes(parsedDate, minutes);
+                } else {
+                    // Try to extract time from natural language
+                    const timeMatch = time.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+                    if (timeMatch) {
+                        let hours = parseInt(timeMatch[1]);
+                        const minutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+                        const ampm = timeMatch[3] ? timeMatch[3].toLowerCase() : null;
+
+                        // Adjust for AM/PM
+                        if (ampm === 'pm' && hours < 12) {
+                            hours += 12;
+                        } else if (ampm === 'am' && hours === 12) {
+                            hours = 0;
+                        }
+
+                        parsedDate = setHours(parsedDate, hours);
+                        parsedDate = setMinutes(parsedDate, minutes);
+                    } else {
+                        throw new Error(`I couldn't understand the time "${time}". Please use a format like "3:00pm" or "15:00".`);
+                    }
                 }
             }
-
             else if (timeReference) {
                 // First check if this reference exists in user preferences or defaults
                 const timeSettings = timePreferences[timeReference.toLowerCase()] ||
@@ -251,8 +361,9 @@ class DateParserService {
                     parsedDate.setHours(hour, minute, 0, 0);
                     console.log(`Using time reference "${timeReference}": ${hour}:${minute}`);
                 } else {
-                    // Unknown time reference, keep current time
+                    // Unknown time reference
                     console.log(`Unknown time reference: ${timeReference}`);
+                    throw new Error(`I don't understand the time reference "${timeReference}". Please try using a specific time like "3pm" or common times like "morning", "afternoon", or "evening".`);
                 }
             }
 
@@ -269,8 +380,12 @@ class DateParserService {
             if (timezone) {
                 console.log(`Using timezone: ${timezone}`);
                 try {
-                    parsedDate = utcToZonedTime(parsedDate, timezone);
-                    console.log(`After timezone conversion: ${parsedDate}`);
+                    if (typeof utcToZonedTime === 'function') {
+                        parsedDate = utcToZonedTime(parsedDate, timezone);
+                        console.log(`After timezone conversion: ${parsedDate}`);
+                    } else {
+                        console.log('Timezone conversion function not available, skipping');
+                    }
                 } catch (tzError) {
                     console.error('Error applying timezone:', tzError);
                     console.log('Using parsed date without timezone conversion');
@@ -282,7 +397,7 @@ class DateParserService {
             return parsedDate;
         } catch (error) {
             console.error('Error parsing date and time:', error);
-            throw new Error('Could not parse the date and time');
+            throw error; // Rethrow to be handled by the caller
         }
     }
 
@@ -294,11 +409,20 @@ class DateParserService {
      */
     getNextDayOfWeek(date, dayOfWeek) {
         const resultDate = new Date(date.getTime());
+
+        // If "next" is specified and it's the same day, we always want next week
+        if (date.getDay() === dayOfWeek) {
+            // It's the same day of week, so add 7 days to get next week
+            resultDate.setDate(date.getDate() + 7);
+            return resultDate;
+        }
+
+        // Otherwise calculate the next occurrence
         resultDate.setDate(date.getDate() + ((7 + dayOfWeek - date.getDay()) % 7));
 
-        // If the day is today but it's already passed, get next week's occurrence
-        if (resultDate.getDay() === date.getDay() && resultDate.getHours() < date.getHours()) {
-            resultDate.setDate(resultDate.getDate() + 7);
+        // If we got today (case for "this Monday" when today is Monday), check context
+        if (resultDate.toDateString() === date.toDateString()) {
+            // If it's already later in the day, perhaps add extra logic here
         }
 
         return resultDate;
@@ -336,6 +460,18 @@ class DateParserService {
         ];
 
         return relativeDatePatterns.some(pattern => pattern.test(dateStr));
+    }
+
+    isDayOfWeekReference(dateStr) {
+        if (!dateStr) return false;
+
+        const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday',
+            'friday', 'saturday', 'sunday'];
+
+        return dayNames.some(day =>
+            dateStr.toLowerCase().includes(day) ||
+            dateStr.toLowerCase().includes(day.substring(0, 3)) // Mon, Tue, etc.
+        );
     }
 
 

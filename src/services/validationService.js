@@ -65,6 +65,81 @@ class ValidationService {
     }
 
     /**
+     * Validate a date string for basic validity
+     * @param {String} dateStr - The date string to validate
+     * @returns {Object} - Validation result
+     */
+    validateDateString(dateStr) {
+        if (!dateStr) return { valid: false, message: "Date is required" };
+
+        // Handle relative dates (these are always valid)
+        if (this.isRelativeDate(dateStr)) {
+            return { valid: true };
+        }
+
+        // Check for invalid date patterns
+        if (/\d+(?:st|nd|rd|th)/.test(dateStr)) {
+            // Contains ordinals like 1st, 2nd, 3rd, 4th, etc.
+            const ordinalMatch = dateStr.match(/(\d+)(?:st|nd|rd|th)/);
+            if (ordinalMatch) {
+                const day = parseInt(ordinalMatch[1]);
+                if (day > 31) {
+                    return {
+                        valid: false,
+                        message: `There's no ${ordinalMatch[0]} day in any month. Please provide a valid date.`
+                    };
+                }
+            }
+        }
+
+        // Check for invalid month names
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december'];
+
+        for (const month of monthNames) {
+            if (dateStr.toLowerCase().includes(month)) {
+                // Found a month name, now check for invalid day
+                const dayMatch = dateStr.match(/(\d+)(?:st|nd|rd|th)?\s+(?:of\s+)?/i);
+                if (dayMatch) {
+                    const day = parseInt(dayMatch[1]);
+                    let maxDay;
+
+                    // Check month's maximum day
+                    if (['april', 'june', 'september', 'november'].includes(month)) {
+                        maxDay = 30;
+                    } else if (month === 'february') {
+                        maxDay = 29; // Accounting for leap years
+                    } else {
+                        maxDay = 31;
+                    }
+
+                    if (day > maxDay) {
+                        return {
+                            valid: false,
+                            message: `There's no ${day}${this.getOrdinalSuffix(day)} day in ${month.charAt(0).toUpperCase() + month.slice(1)}. Please provide a valid date.`
+                        };
+                    }
+                }
+
+                break;
+            }
+        }
+
+        return { valid: true };
+    }
+
+    /**
+     * Get ordinal suffix for a number (1st, 2nd, 3rd, etc.)
+     * @param {Number} n - The number
+     * @returns {String} - Ordinal suffix
+     */
+    getOrdinalSuffix(n) {
+        const s = ['th', 'st', 'nd', 'rd'];
+        const v = n % 100;
+        return s[(v - 20) % 10] || s[v] || s[0];
+    }
+
+    /**
      * Validate a date to ensure it's not too far in the past
      * @param {Date} date - Date to validate
      * @returns {Object} - Validation result
@@ -140,6 +215,26 @@ class ValidationService {
             return {
                 valid: false,
                 message: "I need to know what to remind you about."
+            };
+        }
+
+        // Check if the content is just a date/time reference
+        const timeReferences = ['morning', 'afternoon', 'evening', 'night',
+            'tomorrow', 'today', 'next week', 'next month'];
+
+        // Check if content is just a time reference
+        const isTimeReference = timeReferences.some(ref =>
+            content.toLowerCase() === ref ||
+            content.toLowerCase() === `${ref}` ||
+            content.toLowerCase() === `tomorrow ${ref}` ||
+            content.toLowerCase() === `today ${ref}`
+        );
+
+        if (isTimeReference) {
+            return {
+                valid: false,
+                message: "What would you like to be reminded about?",
+                reason: "content_is_time_reference"
             };
         }
 
