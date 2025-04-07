@@ -56,7 +56,7 @@ const processUserMessage = async (user, messageText) => {
             console.log('Raw LLM response:', responseContent);
 
             // Try to extract JSON if it's wrapped in text or code blocks
-            let jsonContent = responseContent;
+            let jsonContent = responseContent.trim();
 
             // Check if response contains JSON inside ```json blocks
             const jsonBlockMatch = responseContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
@@ -201,6 +201,9 @@ const getSystemPrompt = (conversationState) => {
                 For times, extract in one of these formats:
                 - HH:MM in 24-hour format (e.g., 09:00 or 14:30) for specific times
                 - Or include a timeReference like "morning", "afternoon", "evening", "night"
+
+                For relative times like "in X minutes" or "in X hours", extract as:
+                { "relativeTime": { "unit": "minutes|hours", "amount": X } }
                 
                 Today's date is ${format(new Date(), 'yyyy-MM-dd')}.
                 
@@ -735,14 +738,34 @@ const createReminderFromResponse = async (user, response) => {
         // Parse the date and time using our enhanced parser
         let scheduledDateTime;
         try {
-            // Prepare the date/time info for the parser
-            const dateTimeInfo = {
-                date: response.date,
-                time: response.time,
-                timeReference: response.timeReference
-            };
+            // Special handling for relative time expressions (priority over other parsing)
+            if (response.relativeTime) {
+                // Simple relative time handling without timezone dependency
+                const now = new Date();
+                const { unit, amount } = response.relativeTime;
 
-            scheduledDateTime = await dateParserService.parseDateTime(dateTimeInfo, user._id, userTimeZone);
+                console.log(`Processing relative time: ${amount} ${unit}`);
+
+                if (unit === 'minutes' || unit === 'minute') {
+                    scheduledDateTime = new Date(now.getTime() + (amount * 60 * 1000));
+                } else if (unit === 'hours' || unit === 'hour') {
+                    scheduledDateTime = new Date(now.getTime() + (amount * 60 * 60 * 1000));
+                } else {
+                    throw new Error('Unsupported time unit');
+                }
+
+                console.log(`Parsed from relative time: ${scheduledDateTime}`);
+            } else {
+                // Regular date/time parsing for non-relative expressions
+                // Prepare the date/time info for the parser
+                const dateTimeInfo = {
+                    date: response.date,
+                    time: response.time,
+                    timeReference: response.timeReference
+                };
+
+                scheduledDateTime = await dateParserService.parseDateTime(dateTimeInfo, user._id, userTimeZone);
+            }
 
             console.log(`Parsed date: ${scheduledDateTime.toISOString()}`);
 
@@ -902,7 +925,9 @@ const handleIncompleteReminder = async (user, response) => {
  * Handle datetime followup
  */
 const handleDateTimeFollowup = async (user, response, conversationState) => {
-    if (response.date && response.time) {
+    // Check if we have enough information to create a reminder
+    // Valid combinations are date+time or date+timeReference or relativeTime
+    if ((response.date && (response.time || response.timeReference)) || response.relativeTime) {
         // Log the conversation state to debug
         console.log("Current conversation state:", conversationState);
 
@@ -911,12 +936,14 @@ const handleDateTimeFollowup = async (user, response, conversationState) => {
 
         console.log("Creating reminder with content:", reminderContent);
 
-        // We now have date and time
+        // We now have date and time/timeReference or relativeTime
         await createReminderFromResponse(user, {
             type: 'reminder',
             content: reminderContent, // Use the content saved in conversation state
             date: response.date,
             time: response.time,
+            timeReference: response.timeReference,
+            relativeTime: response.relativeTime,
             recurrence: 'none'
         });
     } else {

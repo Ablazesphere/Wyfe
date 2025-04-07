@@ -1,6 +1,6 @@
 // src/services/dateParserService.js
 
-const { parseISO, addDays, addWeeks, addMonths, setHours, setMinutes, format, parse } = require('date-fns');
+const { parseISO, addDays, addWeeks, addMonths, addMinutes, addHours, setHours, setMinutes, format, parse } = require('date-fns');
 const { zonedTimeToUtc, utcToZonedTime } = require('date-fns-tz');
 const userPreferenceService = require('./userPreferenceService');
 
@@ -35,6 +35,30 @@ class DateParserService {
     }
 
     /**
+     * Handle relative time expressions (in X minutes/hours)
+     * @param {Object} relativeTime - {unit, amount} object
+     * @returns {Date} - Calculated future date
+     */
+    handleRelativeTime(relativeTime) {
+        if (!relativeTime) return null;
+
+        const now = new Date();
+        const { unit, amount } = relativeTime;
+
+        if (!unit || !amount) return null;
+
+        console.log(`Processing relative time: ${amount} ${unit}`);
+
+        if (unit === 'minutes' || unit === 'minute') {
+            return new Date(now.getTime() + (amount * 60 * 1000));
+        } else if (unit === 'hours' || unit === 'hour') {
+            return new Date(now.getTime() + (amount * 60 * 60 * 1000));
+        }
+
+        return null;
+    }
+
+    /**
      * Parse date and time from LLM response and convert to user's timezone
      * @param {Object} dateTimeInfo - The date and time information from LLM
      * @param {String} userId - User ID for preferences
@@ -42,9 +66,14 @@ class DateParserService {
      * @returns {Date} - JavaScript Date object in user's timezone
      */
     async parseDateTime(dateTimeInfo, userId, timezone = 'Asia/Kolkata') {
-        let { date, time, timeReference } = dateTimeInfo;
+        let { date, time, timeReference, relativeTime } = dateTimeInfo;
         const now = new Date();
         let parsedDate;
+
+        // Fix any string "null" values that might come from the LLM
+        if (time === "null") time = null;
+        if (timeReference === "null") timeReference = null;
+        if (date === "null") date = null;
 
         // Get user's time preferences
         let timePreferences = this.timeDefaults;
@@ -58,7 +87,75 @@ class DateParserService {
         }
 
         try {
-            // Handle date
+            // Handle relative time expressions first (priority over other parsing)
+            if (relativeTime) {
+                const { unit, amount } = relativeTime;
+                console.log(`Processing relative time: ${amount} ${unit}`);
+
+                if (unit === 'minutes' || unit === 'minute') {
+                    parsedDate = addMinutes(now, amount);
+                } else if (unit === 'hours' || unit === 'hour') {
+                    parsedDate = addHours(now, amount);
+                } else if (unit === 'days' || unit === 'day') {
+                    parsedDate = addDays(now, amount);
+                }
+
+                console.log(`Parsed relative time: ${amount} ${unit}, result: ${parsedDate}`);
+
+                // If we have a valid date from relative time, return it
+                if (parsedDate && !isNaN(parsedDate.getTime())) {
+                    console.log(`Using timezone: ${timezone}`);
+
+                    // If timezone is valid, apply it
+                    if (timezone) {
+                        try {
+                            parsedDate = utcToZonedTime(parsedDate, timezone);
+                            console.log(`After timezone conversion: ${parsedDate}`);
+                        } catch (tzError) {
+                            console.error('Error applying timezone:', tzError);
+                            console.log('Using parsed date without timezone conversion');
+                        }
+                    }
+
+                    return parsedDate;
+                }
+            }
+
+            // Handle relative minute expressions in the date string
+            if (typeof date === 'string' && date.match(/in\s+(\d+)\s+(minute|minutes|hour|hours)/i)) {
+                const match = date.match(/in\s+(\d+)\s+(minute|minutes|hour|hours)/i);
+                const amount = parseInt(match[1]);
+                const unit = match[2].toLowerCase();
+
+                console.log(`Found relative time in date string: ${amount} ${unit}`);
+
+                if (unit === 'minutes' || unit === 'minute') {
+                    parsedDate = addMinutes(now, amount);
+                } else if (unit === 'hours' || unit === 'hour') {
+                    parsedDate = addHours(now, amount);
+                }
+
+                console.log(`Parsed date from relative time: ${parsedDate}`);
+
+                // If we have a valid date, apply timezone and return
+                if (parsedDate && !isNaN(parsedDate.getTime())) {
+                    if (timezone) {
+                        try {
+                            console.log(`Using timezone: ${timezone}`);
+                            parsedDate = utcToZonedTime(parsedDate, timezone);
+                            console.log(`After timezone conversion: ${parsedDate}`);
+                        } catch (tzError) {
+                            console.error('Error applying timezone:', tzError);
+                        }
+                    } else {
+                        console.log('No timezone conversion (skipped)');
+                    }
+
+                    return parsedDate;
+                }
+            }
+
+            // Standard date parsing
             if (date) {
                 // If it's a full date string (YYYY-MM-DD)
                 if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -94,6 +191,10 @@ class DateParserService {
                         parsedDate = addWeeks(now, amount);
                     } else if (unit === 'month' || unit === 'months') {
                         parsedDate = addMonths(now, amount);
+                    } else if (unit === 'minute' || unit === 'minutes') {
+                        parsedDate = addMinutes(now, amount);
+                    } else if (unit === 'hour' || unit === 'hours') {
+                        parsedDate = addHours(now, amount);
                     }
                 }
                 else if (/^this\s+(\w+)$/i.test(date)) {
@@ -155,13 +256,6 @@ class DateParserService {
                 }
             }
 
-            // // Handle time references like "morning", "evening", etc. using user preferences
-            // else if (timeReference && timePreferences[timeReference.toLowerCase()]) {
-            //     const { hour, minute } = timePreferences[timeReference.toLowerCase()];
-            //     parsedDate = setHours(parsedDate, hour);
-            //     parsedDate = setMinutes(parsedDate, minute);
-            // }
-
             // Ensure the date is not in the past
             if (parsedDate < now) {
                 // If it's today and the time has already passed, move to tomorrow
@@ -173,7 +267,16 @@ class DateParserService {
 
             // Convert to user's timezone if needed
             if (timezone) {
-                parsedDate = utcToZonedTime(parsedDate, timezone);
+                console.log(`Using timezone: ${timezone}`);
+                try {
+                    parsedDate = utcToZonedTime(parsedDate, timezone);
+                    console.log(`After timezone conversion: ${parsedDate}`);
+                } catch (tzError) {
+                    console.error('Error applying timezone:', tzError);
+                    console.log('Using parsed date without timezone conversion');
+                }
+            } else {
+                console.log(`Using timezone: ${timezone} (conversion skipped)`);
             }
 
             return parsedDate;
@@ -235,6 +338,8 @@ class DateParserService {
         return relativeDatePatterns.some(pattern => pattern.test(dateStr));
     }
 
+
+
     /**
      * Convert a relative date to an absolute date
      * @param {String} relativeDate - Relative date expression
@@ -274,6 +379,10 @@ class DateParserService {
                     resultDate = addWeeks(now, amount);
                 } else if (unit === 'month' || unit === 'months') {
                     resultDate = addMonths(now, amount);
+                } else if (unit === 'minute' || unit === 'minutes') {
+                    resultDate = addMinutes(now, amount);
+                } else if (unit === 'hour' || unit === 'hours') {
+                    resultDate = addHours(now, amount);
                 }
             }
 
