@@ -110,13 +110,27 @@ const handleReminderResponse = async (user, messageText) => {
         // Keywords indicating completion
         const completionKeywords = ['done', 'completed', 'finished', 'complete', 'ok done', 'got it'];
 
-        if (completionKeywords.some(keyword => lowerMessage === keyword)) {
+        // Patterns indicating completion (partial matches)
+        const completionPatterns = [
+            /mark.*done/i,
+            /mark.*complete/i,
+            /mark.*finished/i,
+            /complete.*reminder/i,
+            /finish.*reminder/i,
+            /done.*reminder/i
+        ];
+
+        const isExactMatch = completionKeywords.some(keyword => lowerMessage === keyword);
+        const isPatternMatch = completionPatterns.some(pattern => pattern.test(lowerMessage));
+
+        if (isExactMatch || isPatternMatch) {
             // Attempt to find the most recent reminder sent to the user
             const reminderService = require('../services/reminderService');
             const recentReminders = await reminderService.getRecentSentReminders(user._id, 1);
 
             if (recentReminders && recentReminders.length > 0) {
                 const reminder = recentReminders[0];
+                const whatsappService = require('../services/whatsappService');
 
                 // Update reminder status
                 await reminderService.updateReminderStatus(reminder._id, 'acknowledged');
@@ -126,6 +140,10 @@ const handleReminderResponse = async (user, messageText) => {
                     user.phoneNumber,
                     `✅ Marked "${reminder.content}" as complete.`
                 );
+
+                // Reset the conversation state to initial
+                user.conversationState = { stage: 'initial' };
+                await user.save();
 
                 return true; // Message was handled as a reminder response
             }

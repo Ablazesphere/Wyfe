@@ -27,7 +27,7 @@ const getUserReminders = async (userId) => {
     try {
         const reminders = await Reminder.find({
             user: userId,
-            status: { $ne: 'cancelled' }
+            status: { $nin: ['cancelled', 'acknowledged'] }  // Use $nin (not in) to exclude multiple statuses
         }).sort({ scheduledFor: 1 });
 
         return reminders;
@@ -104,13 +104,12 @@ const getRemindersInRange = async (userId, startDate, endDate) => {
     try {
         const reminders = await Reminder.find({
             user: userId,
-            scheduledFor: { $gte: startDate, $lte: endDate },
-            status: { $ne: 'cancelled' }
+            status: { $nin: ['cancelled', 'acknowledged'] }  // Use $nin (not in) to exclude multiple statuses
         }).sort({ scheduledFor: 1 });
 
         return reminders;
     } catch (error) {
-        console.error('Error fetching reminders in range:', error);
+        console.error('Error fetching user reminders:', error);
         throw error;
     }
 };
