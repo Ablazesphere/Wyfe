@@ -365,7 +365,7 @@ const handleNlpResponse = async (user, response, conversationState, messageText 
     switch (response.type) {
         case 'reminder':
             // Complete reminder information
-            await createReminderFromResponse(user, response, originalMessage);
+            await createReminderFromResponse(user, response, messageText);
             break;
 
 
