@@ -116,6 +116,110 @@ const getRemindersInRange = async (userId, startDate, endDate) => {
 };
 
 /**
+ * Create a recurring reminder
+ * @param {Object} reminderData - Base reminder data
+ * @param {Object} recurrencePattern - Recurrence pattern details
+ * @param {Date|String} endDate - Optional end date for recurrence
+ * @returns {Promise<Object>} - Created reminder object
+ */
+const createRecurringReminder = async (reminderData, recurrencePattern, endDate = null) => {
+    try {
+        // Handle end date formatting if it's a string and not "null"
+        let formattedEndDate = null;
+
+        if (endDate && endDate !== "null" && endDate !== null) {
+            // Convert string to Date object if it's a valid date string
+            if (typeof endDate === 'string') {
+                // Check if it's a valid date string
+                const parsedDate = new Date(endDate);
+                if (!isNaN(parsedDate.getTime())) {
+                    formattedEndDate = parsedDate;
+                }
+            } else if (endDate instanceof Date && !isNaN(endDate.getTime())) {
+                // It's already a valid Date object
+                formattedEndDate = endDate;
+            }
+        }
+
+        console.log(`Creating recurring reminder with endDate: ${formattedEndDate}`);
+
+        // Create the reminder with recurrence information
+        const reminder = new Reminder({
+            ...reminderData,
+            recurrence: recurrencePattern.frequency ? 'custom' : reminderData.recurrence,
+            recurrencePattern: recurrencePattern,
+            endDate: formattedEndDate  // Use the safely parsed end date
+        });
+
+        await reminder.save();
+        return reminder;
+    } catch (error) {
+        console.error('Error creating recurring reminder:', error);
+        throw error;
+    }
+};
+
+/**
+ * Process recurrence and create next instance
+ * @param {Object} reminder - Completed reminder object
+ * @returns {Promise<Object|null>} - Next reminder instance or null if done
+ */
+const processRecurrence = async (reminder) => {
+    try {
+        // Skip if no recurrence pattern or it's a one-time reminder
+        if (reminder.recurrence === 'none' || !reminder.recurrencePattern) {
+            return null;
+        }
+
+        const recurrenceParserService = require('./recurrenceParserService');
+
+        // Calculate next occurrence
+        const baseDate = reminder.scheduledFor;
+        const endDate = reminder.endDate;
+
+        let nextDate;
+
+        // Handle basic recurrence types
+        if (reminder.recurrence === 'daily') {
+            nextDate = addDays(baseDate, 1);
+        } else if (reminder.recurrence === 'weekly') {
+            nextDate = addWeeks(baseDate, 1);
+        } else if (reminder.recurrence === 'monthly') {
+            nextDate = addMonths(baseDate, 1);
+        } else if (reminder.recurrence === 'custom') {
+            // Use the recurrence parser for custom patterns
+            nextDate = recurrenceParserService.calculateNextOccurrence(
+                baseDate,
+                reminder.recurrencePattern,
+                endDate
+            );
+        }
+
+        // If no next date or we're past the end date, we're done
+        if (!nextDate || (endDate && nextDate > endDate)) {
+            return null;
+        }
+
+        // Create the next instance of this reminder
+        const nextReminder = new Reminder({
+            user: reminder.user,
+            content: reminder.content,
+            scheduledFor: nextDate,
+            recurrence: reminder.recurrence,
+            recurrencePattern: reminder.recurrencePattern,
+            endDate: reminder.endDate,
+            notificationMethod: reminder.notificationMethod
+        });
+
+        await nextReminder.save();
+        return nextReminder;
+    } catch (error) {
+        console.error('Error processing recurrence:', error);
+        throw error;
+    }
+};
+
+/**
  * Search reminders by content
  * @param {String} userId - User ID
  * @param {String} searchTerm - Content to search for
@@ -206,6 +310,32 @@ const updateReminder = async (reminderId, updateData) => {
     }
 };
 
+/**
+ * Get recently sent reminders for a user
+ * @param {String} userId - User ID
+ * @param {Number} limit - Maximum number of reminders to return
+ * @returns {Promise<Array>} - List of recent reminders
+ */
+const getRecentSentReminders = async (userId, limit = 5) => {
+    try {
+        const recentTime = new Date();
+        recentTime.setHours(recentTime.getHours() - 1); // Look at reminders in the last hour
+
+        const reminders = await Reminder.find({
+            user: userId,
+            status: 'sent',
+            scheduledFor: { $gte: recentTime }
+        })
+            .sort({ scheduledFor: -1 })
+            .limit(limit);
+
+        return reminders;
+    } catch (error) {
+        console.error('Error fetching recent sent reminders:', error);
+        throw error;
+    }
+};
+
 // Add these methods to module.exports
 module.exports = {
     createReminder,
@@ -216,5 +346,8 @@ module.exports = {
     getRemindersInRange,
     searchRemindersByContent,
     getReminderById,
-    updateReminder
+    updateReminder,
+    createRecurringReminder,
+    processRecurrence,
+    getRecentSentReminders
 };

@@ -77,8 +77,16 @@ const handleIncomingMessage = async (req, res) => {
             user.lastInteraction = new Date();
             await user.save();
 
-            // Process the message using NLP service
-            await processUserMessage(user, text.body);
+            // Check if this is a response to a reminder notification
+            const isReminderResponse = await handleReminderResponse(user, text.body);
+
+            if (isReminderResponse) {
+                // The message was handled as a reminder response, no need for NLP processing
+                console.log('Handled as reminder response');
+            } else {
+                // Process the message using NLP service
+                await processUserMessage(user, text.body);
+            }
         }
 
         // Acknowledge receipt
@@ -89,7 +97,50 @@ const handleIncomingMessage = async (req, res) => {
     }
 };
 
+/**
+ * Handle user responses to reminders
+ * @param {Object} user - User document
+ * @param {String} messageText - Message text from user
+ */
+const handleReminderResponse = async (user, messageText) => {
+    try {
+        // Check if the message is a response to a reminder
+        const lowerMessage = messageText.toLowerCase().trim();
+
+        // Keywords indicating completion
+        const completionKeywords = ['done', 'completed', 'finished', 'complete', 'ok done', 'got it'];
+
+        if (completionKeywords.some(keyword => lowerMessage === keyword)) {
+            // Attempt to find the most recent reminder sent to the user
+            const reminderService = require('../services/reminderService');
+            const recentReminders = await reminderService.getRecentSentReminders(user._id, 1);
+
+            if (recentReminders && recentReminders.length > 0) {
+                const reminder = recentReminders[0];
+
+                // Update reminder status
+                await reminderService.updateReminderStatus(reminder._id, 'acknowledged');
+
+                // Send confirmation
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    `✅ Marked "${reminder.content}" as complete.`
+                );
+
+                return true; // Message was handled as a reminder response
+            }
+        }
+
+        // Not a reminder response
+        return false;
+    } catch (error) {
+        console.error('Error handling reminder response:', error);
+        return false;
+    }
+};
+
 module.exports = {
     verifyWebhook,
-    handleIncomingMessage
+    handleIncomingMessage,
+    handleReminderResponse
 };

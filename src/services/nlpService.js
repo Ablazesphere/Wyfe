@@ -23,11 +23,15 @@ const processUserMessage = async (user, messageText) => {
         // Create system prompt based on conversation stage
         const systemPrompt = getSystemPrompt(conversationState);
 
+        // Extract recurrence pattern directly using the recurrence parser
+        const recurrenceParserService = require('./recurrenceParserService');
+        const recurrenceInfo = recurrenceParserService.parseRecurrencePattern(messageText);
+
         // Get completion from OpenRouter with Llama or another open-source model
         const openRouterResponse = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
-                model: process.env.LLM_MODEL || "meta-llama/llama-3-8b-instruct", // Default to Llama 3 8B
+                model: process.env.LLM_MODEL || "meta-llama/llama-3-8b-instruct",
                 messages: [
                     {
                         role: "system",
@@ -35,22 +39,22 @@ const processUserMessage = async (user, messageText) => {
                     },
                     { role: "user", content: messageText }
                 ],
-                temperature: 0.3, // Lower temperature for more predictable outputs
+                temperature: 0.3,
                 response_format: { type: "json_object" },
-                max_tokens: 500 // Limit token length to avoid verbose responses
+                max_tokens: 500
             },
             {
                 headers: {
                     'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-                    'HTTP-Referer': process.env.APP_URL, // Required by OpenRouter
-                    'X-Title': 'Reminder System', // Optional
+                    'HTTP-Referer': process.env.APP_URL,
+                    'X-Title': 'Reminder System',
                     'Content-Type': 'application/json'
                 }
             }
         );
 
         // Parse response with error handling
-        let response;
+        let nlpResponse;
         try {
             const responseContent = openRouterResponse.data.choices[0].message.content;
             console.log('Raw LLM response:', responseContent);
@@ -71,14 +75,73 @@ const processUserMessage = async (user, messageText) => {
                 }
             }
 
-            response = JSON.parse(jsonContent);
-            console.log('Parsed JSON response:', response);
+            nlpResponse = JSON.parse(jsonContent);
+            console.log('Parsed JSON response:', nlpResponse);
+
+            // Check for multiple days of week pattern
+            if (nlpResponse.type === 'reminder') {
+                const lowerMessage = messageText.toLowerCase();
+
+                // Map of day names to numbers
+                const daysOfWeek = {
+                    'sunday': 0,
+                    'monday': 1,
+                    'tuesday': 2,
+                    'wednesday': 3,
+                    'thursday': 4,
+                    'friday': 5,
+                    'saturday': 6
+                };
+
+                // Check for day name mentions
+                let mentionedDays = [];
+
+                for (const [dayName, dayNum] of Object.entries(daysOfWeek)) {
+                    if (lowerMessage.includes(dayName)) {
+                        mentionedDays.push(dayNum);
+                    }
+                }
+
+                // If multiple days mentioned, update the recurrence pattern
+                if (mentionedDays.length > 1) {
+                    console.log(`Detected multiple days of week: ${mentionedDays}`);
+
+                    if (!nlpResponse.recurrencePattern) {
+                        nlpResponse.recurrencePattern = {};
+                    }
+
+                    nlpResponse.recurrence = 'custom';
+                    nlpResponse.recurrencePattern.frequency = 'week';
+                    nlpResponse.recurrencePattern.interval = 1;
+                    nlpResponse.recurrencePattern.daysOfWeek = mentionedDays;
+
+                    // Remove the single dayOfWeek if it was set
+                    if (nlpResponse.recurrencePattern.dayOfWeek !== undefined) {
+                        delete nlpResponse.recurrencePattern.dayOfWeek;
+                    }
+                }
+            }
+
+            // Merge with recurrence info if available and applicable
+            if (nlpResponse.type === 'reminder' && recurrenceInfo) {
+                if (recurrenceInfo.recurrence) {
+                    nlpResponse.recurrence = recurrenceInfo.recurrence;
+                    nlpResponse.recurrencePattern = recurrenceInfo.recurrencePattern;
+                }
+
+                if (recurrenceInfo.endDate) {
+                    nlpResponse.endDate = recurrenceInfo.endDate;
+                }
+
+                console.log('Enhanced with recurrence info:', nlpResponse);
+            }
+
         } catch (parseError) {
             console.error('Error parsing LLM response:', parseError);
             console.log('Attempting to create a fallback response');
 
             // Create a fallback response to avoid crashing
-            response = {
+            nlpResponse = {
                 type: "not_reminder",
                 content: "unrecognized message format"
             };
@@ -87,7 +150,7 @@ const processUserMessage = async (user, messageText) => {
             if (messageText.toLowerCase().includes('remind') ||
                 messageText.toLowerCase().includes('tomorrow') ||
                 messageText.toLowerCase().includes('today')) {
-                response = {
+                nlpResponse = {
                     type: "incomplete_reminder",
                     content: messageText,
                     date: null,
@@ -98,7 +161,7 @@ const processUserMessage = async (user, messageText) => {
         }
 
         // Process the response based on what we received
-        await handleNlpResponse(user, response, conversationState);
+        await handleNlpResponse(user, nlpResponse, conversationState, messageText);
 
     } catch (error) {
         console.error('Error processing message with NLP:', error);
@@ -205,6 +268,19 @@ const getSystemPrompt = (conversationState) => {
                 For relative times like "in X minutes" or "in X hours", extract as:
                 { "relativeTime": { "unit": "minutes|hours", "amount": X } }
                 
+                For recurrence patterns, extract details like:
+                - "daily", "weekly", "monthly" for simple recurrence
+                - For complex patterns like "every other Tuesday until December", extract as:
+                {
+                  "recurrenceType": "custom",
+                  "pattern": {
+                    "frequency": "week",
+                    "interval": 2,  // 1 = every, 2 = every other, 3 = every third, etc.
+                    "dayOfWeek": 2  // 0 = Sunday, 1 = Monday, 2 = Tuesday, etc.
+                  },
+                  "endDate": "2025-12-31"  // Extract end date if specified
+                }
+                
                 Today's date is ${format(new Date(), 'yyyy-MM-dd')}.
                 
                 If the message is asking to create a reminder, respond with:
@@ -214,7 +290,15 @@ const getSystemPrompt = (conversationState) => {
                   "date": "YYYY-MM-DD or relative date expression", 
                   "time": "HH:MM or null if using timeReference", 
                   "timeReference": "morning/afternoon/evening/night (if applicable)",
-                  "recurrence": "none|daily|weekly|monthly" 
+                  "recurrence": "none|daily|weekly|monthly|custom",
+                  "recurrencePattern": { // Only if recurrence is "custom"
+                    "frequency": "day|week|month|year",
+                    "interval": 1, // 1 = every, 2 = every other, etc.
+                    "dayOfWeek": 0-6, // 0 = Sunday, etc., null if not applicable
+                    "dayOfMonth": 1-31, // null if not applicable
+                    "monthOfYear": 0-11 // 0 = January, etc., null if not applicable
+                  },
+                  "endDate": "YYYY-MM-DD or null" // End date for recurrence if specified
                 }
                 
                 If reminder information is incomplete, respond with: 
@@ -269,16 +353,21 @@ const getSystemPrompt = (conversationState) => {
 
 /**
  * Handle the parsed NLP response based on its type
+ * @param {Object} user - The user document
+ * @param {Object} response - The parsed NLP response
+ * @param {Object} conversationState - The current conversation state
+ * @param {String} messageText - The original message text from user
  */
-const handleNlpResponse = async (user, response, conversationState) => {
+const handleNlpResponse = async (user, response, conversationState, messageText = '') => {
     // Update the last processed message timestamp
     user.lastInteraction = new Date();
 
     switch (response.type) {
         case 'reminder':
             // Complete reminder information
-            await createReminderFromResponse(user, response);
+            await createReminderFromResponse(user, response, originalMessage);
             break;
+
 
         case 'list_reminders':
             await handleListReminders(user, response);
@@ -794,8 +883,11 @@ const handleUpdateReminder = async (user, response) => {
 
 /**
  * Create a reminder from complete information with proper timezone handling
+ * @param {Object} user - User document from database
+ * @param {Object} response - Parsed NLP response
+ * @param {String} originalMessage - Original message text from user (optional)
  */
-const createReminderFromResponse = async (user, response) => {
+const createReminderFromResponse = async (user, response, originalMessage = '') => {
     try {
         // Validate content
         const contentValidation = validationService.validateContent(response.content);
@@ -815,7 +907,6 @@ const createReminderFromResponse = async (user, response) => {
                 };
                 await user.save();
             }
-
             else if (contentValidation.suggestion && contentValidation.suggestion.action === 'shorten') {
                 // Set conversation state to await shorter content
                 user.conversationState = {
@@ -825,7 +916,6 @@ const createReminderFromResponse = async (user, response) => {
                     timeReference: response.timeReference
                 };
             }
-
             return;
         }
 
@@ -896,7 +986,6 @@ const createReminderFromResponse = async (user, response) => {
                     dateValidation.suggestion.message
                 );
             }
-
             return;
         } else if (dateValidation.adjusted) {
             // If the date was slightly adjusted
@@ -922,7 +1011,6 @@ const createReminderFromResponse = async (user, response) => {
                 user.phoneNumber,
                 conflictCheck.message
             );
-
             return;
         }
 
@@ -946,27 +1034,141 @@ const createReminderFromResponse = async (user, response) => {
                 time: response.time,
                 timeReference: response.timeReference
             };
-
             return;
         }
 
-        // Create the reminder
-        const reminder = await reminderService.createReminder({
-            user: user._id,
-            content: response.content,
-            scheduledFor: scheduledDateTime,
-            recurrence: response.recurrence || 'none',
-            notificationMethod: user.preferredNotificationMethod
-        });
+        // Handle recurrence patterns
+        let recurrencePattern = null;
+        let endDate = null;
+        const recurrenceParserService = require('./recurrenceParserService');
 
-        // Format date for user-friendly message
-        const scheduledDate = dateParserService.formatDateForDisplay(scheduledDateTime);
+        // Handle end date from response or recurrence pattern
+        if (response.endDate && response.endDate !== "null") {
+            try {
+                // Direct parsing if it's in ISO format
+                if (/^\d{4}-\d{2}-\d{2}$/.test(response.endDate)) {
+                    endDate = parseISO(response.endDate);
+                    console.log(`Parsed ISO end date: ${endDate}`);
+                } else {
+                    // Try to extract end date via recurrence parser
+                    const recurrenceText = `until ${response.endDate}`;
+                    const parsedRecurrence = recurrenceParserService.parseRecurrencePattern(recurrenceText);
 
-        // Send confirmation message
-        await whatsappService.sendMessage(
-            user.phoneNumber,
-            `✅ Reminder set for ${scheduledDate}: "${response.content}"`
-        );
+                    if (parsedRecurrence && parsedRecurrence.endDate) {
+                        endDate = parseISO(parsedRecurrence.endDate);
+                        console.log(`Parsed end date from text: ${endDate}`);
+                    }
+                }
+
+                // Validate the parsed date
+                if (endDate && isNaN(endDate.getTime())) {
+                    console.log('Invalid end date format, using null instead');
+                    endDate = null;
+                }
+            } catch (error) {
+                console.error('Error parsing end date:', error);
+                endDate = null;
+            }
+        }
+
+        // Extract end date from the recurrence pattern if available
+        if (response.recurrencePattern && response.recurrencePattern.endDate) {
+            try {
+                endDate = parseISO(response.recurrencePattern.endDate);
+                // Remove from pattern to avoid duplication
+                delete response.recurrencePattern.endDate;
+            } catch (error) {
+                console.error('Error parsing endDate from recurrencePattern:', error);
+            }
+        }
+
+        // Check if we need to extract end date from message text
+        if (!endDate && originalMessage && originalMessage.toLowerCase().includes('until')) {
+            try {
+                const recurrenceText = originalMessage;
+                const parsedRecurrence = recurrenceParserService.parseRecurrencePattern(recurrenceText);
+
+                if (parsedRecurrence && parsedRecurrence.endDate) {
+                    endDate = parseISO(parsedRecurrence.endDate);
+                    console.log(`Extracted end date from message text: ${endDate}`);
+                }
+            } catch (error) {
+                console.error('Error extracting end date from message:', error);
+            }
+        }
+
+        // Check if we have a custom recurrence pattern
+        if (response.recurrence === 'custom' && response.recurrencePattern) {
+            recurrencePattern = response.recurrencePattern;
+        }
+        // If we have a simple recurrence (daily, weekly, monthly), convert to pattern format
+        else if (['daily', 'weekly', 'monthly'].includes(response.recurrence)) {
+            const frequencyMap = {
+                'daily': 'day',
+                'weekly': 'week',
+                'monthly': 'month'
+            };
+
+            recurrencePattern = {
+                frequency: frequencyMap[response.recurrence],
+                interval: 1
+            };
+        }
+
+        // Create the reminder with recurrence if applicable
+        let reminder;
+
+        if (recurrencePattern) {
+            console.log('Creating recurring reminder with pattern:', JSON.stringify(recurrencePattern));
+            console.log('End date:', endDate ? endDate.toISOString() : 'null');
+
+            try {
+                // Use createRecurringReminder for recurring reminders
+                reminder = await reminderService.createRecurringReminder({
+                    user: user._id,
+                    content: response.content,
+                    scheduledFor: scheduledDateTime,
+                    notificationMethod: user.preferredNotificationMethod
+                }, recurrencePattern, endDate);
+
+                // Format recurrence for display
+                const recurrenceDescription = recurrenceParserService.formatRecurrenceForDisplay(
+                    recurrencePattern,
+                    scheduledDateTime,
+                    endDate
+                );
+
+                // Format date for user-friendly message
+                const scheduledDate = dateParserService.formatDateForDisplay(scheduledDateTime);
+
+                // Send confirmation message with recurrence info
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    `✅ Recurring reminder set for ${scheduledDate}: "${response.content}"\n\nRecurs: ${recurrenceDescription}`
+                );
+            } catch (error) {
+                console.error('Error creating recurring reminder:', error);
+                throw error; // Re-throw to be handled by the outer catch block
+            }
+        } else {
+            // Use regular createReminder for one-time reminders
+            reminder = await reminderService.createReminder({
+                user: user._id,
+                content: response.content,
+                scheduledFor: scheduledDateTime,
+                recurrence: 'none',
+                notificationMethod: user.preferredNotificationMethod
+            });
+
+            // Format date for user-friendly message
+            const scheduledDate = dateParserService.formatDateForDisplay(scheduledDateTime);
+
+            // Send confirmation message
+            await whatsappService.sendMessage(
+                user.phoneNumber,
+                `✅ Reminder set for ${scheduledDate}: "${response.content}"`
+            );
+        }
 
         // Reset conversation state
         user.conversationState = { stage: 'initial' };
@@ -1102,10 +1304,19 @@ const handleUnclearDateTime = async (user, response, conversationState) => {
     const missing = response.missing || [];
     let message = "I need more information about when you want to be reminded.";
 
-    if (missing.includes('date') && missing.includes('time')) {
+    // Check if the original error contains specific validation messages
+    if (response.error && response.error.message) {
+        message = response.error.message;
+    } else if (missing.includes('date') && missing.includes('time')) {
         message = "Please provide both a date and time for your reminder.";
     } else if (missing.includes('date')) {
-        message = "Please specify what date you want to be reminded.";
+        // Check if there's a validation error in the user input
+        const userInput = user.lastRawInput; // We would need to add this to the user model
+        if (userInput && userInput.includes('35th')) {
+            message = "There's no 35th day in any month. Please provide a valid date.";
+        } else {
+            message = "Please specify what date you want to be reminded.";
+        }
     } else if (missing.includes('time')) {
         message = "Please specify what time you want to be reminded.";
     }

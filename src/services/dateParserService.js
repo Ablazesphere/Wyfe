@@ -59,12 +59,12 @@ class DateParserService {
     }
 
     /**
- * Parse date and time from LLM response and convert to user's timezone
- * @param {Object} dateTimeInfo - The date and time information from LLM
- * @param {String} userId - User ID for preferences
- * @param {String} timezone - The user's timezone
- * @returns {Date} - JavaScript Date object in user's timezone
- */
+  * Parse date and time from LLM response and convert to user's timezone
+  * @param {Object} dateTimeInfo - The date and time information from LLM
+  * @param {String} userId - User ID for preferences
+  * @param {String} timezone - The user's timezone
+  * @returns {Date} - JavaScript Date object in user's timezone
+  */
     async parseDateTime(dateTimeInfo, userId, timezone = 'Asia/Kolkata') {
         let { date, time, timeReference, relativeTime } = dateTimeInfo;
         const now = new Date();
@@ -73,7 +73,7 @@ class DateParserService {
         // Fix any string "null" values that might come from the LLM
         if (time === "null") time = null;
         if (timeReference === "null") timeReference = null;
-        if (date === "null") date = null;
+        if (date === "null" || date === "none") date = null;
 
         // Get user's time preferences
         let timePreferences = this.timeDefaults;
@@ -87,6 +87,43 @@ class DateParserService {
         }
 
         try {
+            // If no date is provided, use today's date
+            if (!date) {
+                console.log('No date provided, using today');
+                parsedDate = new Date();
+
+                // If only time is provided, make sure it's in the future
+                if (time) {
+                    const [hours, minutes] = time.split(':').map(Number);
+                    parsedDate.setHours(hours, minutes, 0, 0);
+
+                    // If the time has already passed today, move to tomorrow
+                    if (parsedDate < now) {
+                        parsedDate.setDate(parsedDate.getDate() + 1);
+                        console.log('Time already passed today, moved to tomorrow');
+                    }
+                }
+
+                // If only timeReference is provided, set appropriate time
+                else if (timeReference) {
+                    const timeSettings = timePreferences[timeReference.toLowerCase()] ||
+                        this.timeDefaults[timeReference.toLowerCase()];
+
+                    if (timeSettings) {
+                        const { hour, minute } = timeSettings;
+                        parsedDate.setHours(hour, minute, 0, 0);
+
+                        // If the time has already passed today, move to tomorrow
+                        if (parsedDate < now) {
+                            parsedDate.setDate(parsedDate.getDate() + 1);
+                            console.log('Time already passed today, moved to tomorrow');
+                        }
+                    }
+                }
+
+                return parsedDate;
+            }
+
             // Validate date string first if it's not a relative date
             if (date && !this.isRelativeDate(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
                 const validation = this.validateDateString(date);
@@ -399,6 +436,85 @@ class DateParserService {
             console.error('Error parsing date and time:', error);
             throw error; // Rethrow to be handled by the caller
         }
+    }
+    /**
+     * Validate a date string for basic validity
+     * @param {String} dateStr - The date string to validate
+     * @returns {Object} - Validation result
+     */
+    validateDateString(dateStr) {
+        if (!dateStr) return { valid: false, message: "Date is required" };
+
+        // Handle special value 'none' which might come from LLM
+        if (dateStr === 'none') {
+            return { valid: true, isNone: true };
+        }
+
+        // Handle relative dates (these are always valid)
+        if (this.isRelativeDate(dateStr)) {
+            return { valid: true };
+        }
+
+        // Check for invalid date patterns
+        if (/\d+(?:st|nd|rd|th)/.test(dateStr)) {
+            // Contains ordinals like 1st, 2nd, 3rd, 4th, etc.
+            const ordinalMatch = dateStr.match(/(\d+)(?:st|nd|rd|th)/);
+            if (ordinalMatch) {
+                const day = parseInt(ordinalMatch[1]);
+                if (day > 31) {
+                    return {
+                        valid: false,
+                        message: `There's no ${ordinalMatch[0]} day in any month. Please provide a valid date.`
+                    };
+                }
+            }
+        }
+
+        // Check for invalid month names
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december'];
+
+        for (const month of monthNames) {
+            if (dateStr.toLowerCase().includes(month)) {
+                // Found a month name, now check for invalid day
+                const dayMatch = dateStr.match(/(\d+)(?:st|nd|rd|th)?\s+(?:of\s+)?/i);
+                if (dayMatch) {
+                    const day = parseInt(dayMatch[1]);
+                    let maxDay;
+
+                    // Check month's maximum day
+                    if (['april', 'june', 'september', 'november'].includes(month)) {
+                        maxDay = 30;
+                    } else if (month === 'february') {
+                        maxDay = 29; // Accounting for leap years
+                    } else {
+                        maxDay = 31;
+                    }
+
+                    if (day > maxDay) {
+                        return {
+                            valid: false,
+                            message: `There's no ${day}${this.getOrdinalSuffix(day)} day in ${month.charAt(0).toUpperCase() + month.slice(1)}. Please provide a valid date.`
+                        };
+                    }
+                }
+
+                break;
+            }
+        }
+
+        return { valid: true };
+    }
+
+    /**
+     * Get ordinal suffix for a number (1st, 2nd, 3rd, etc.)
+     * @param {Number} n - The number
+     * @returns {String} - Ordinal suffix
+     */
+    getOrdinalSuffix(n) {
+        const s = ['th', 'st', 'nd', 'rd'];
+        const v = n % 100;
+        return s[(v - 20) % 10] || s[v] || s[0];
     }
 
     /**

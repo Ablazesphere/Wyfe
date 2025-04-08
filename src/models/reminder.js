@@ -20,8 +20,40 @@ const ReminderSchema = new mongoose.Schema({
     },
     recurrence: {
         type: String,
-        enum: ['none', 'daily', 'weekly', 'monthly'],
+        enum: ['none', 'daily', 'weekly', 'monthly', 'custom'],
         default: 'none'
+    },
+    // New fields for advanced recurrence patterns
+    recurrencePattern: {
+        frequency: {
+            type: String,
+            enum: ['day', 'week', 'month', 'year'],
+            default: null
+        },
+        interval: {
+            type: Number,
+            default: 1 // 1 means every, 2 means every other, etc.
+        },
+        daysOfWeek: {
+            type: [Number], // Array of days (0 = Sunday, 6 = Saturday)
+            default: []
+        },
+        dayOfWeek: {
+            type: Number, // 0 = Sunday, 6 = Saturday
+            default: null
+        },
+        dayOfMonth: {
+            type: Number,
+            default: null
+        },
+        monthOfYear: {
+            type: Number, // 0 = January, 11 = December
+            default: null
+        }
+    },
+    endDate: {
+        type: Date,
+        default: null // null means no end date
     },
     status: {
         type: String,
