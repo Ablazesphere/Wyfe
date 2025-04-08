@@ -9,9 +9,28 @@ const dateParserService = require('./dateParserService');
 const userPreferenceService = require('./userPreferenceService');
 const validationService = require('./validationService');
 
+const preprocessUserMessage = (messageText) => {
+    const enhancements = {};
+
+    // Check for common date patterns that LLM might not correctly extract
+    const lowerMessage = messageText.toLowerCase();
+
+    // Check for "day after tomorrow" which is often misinterpreted
+    if (lowerMessage.includes('day after tomorrow')) {
+        enhancements.dateHint = {
+            type: 'absolute',
+            value: 'day after tomorrow'
+        };
+    }
+
+    return enhancements;
+};
 
 const processUserMessage = async (user, messageText) => {
     try {
+        // Add preprocessing step to enhance date recognition
+        const enhancements = preprocessUserMessage(messageText);
+
         // Extract conversation state from user or create a new one
         const conversationState = user.conversationState || { stage: 'initial' };
 
@@ -78,6 +97,14 @@ const processUserMessage = async (user, messageText) => {
 
             nlpResponse = JSON.parse(jsonContent);
             console.log('Parsed JSON response:', nlpResponse);
+
+            // Check for "day after tomorrow" in the original message and fix the date
+            // This is the key fix for the issue
+            if (nlpResponse.type === 'reminder' && messageText.toLowerCase().includes('day after tomorrow')) {
+                console.log('Detected "day after tomorrow" in message, overriding LLM date extraction');
+                nlpResponse.date = 'day after tomorrow';
+                console.log('Updated response:', nlpResponse);
+            }
 
             // Check for multiple days of week pattern
             if (nlpResponse.type === 'reminder') {
@@ -297,7 +324,7 @@ const getSystemPrompt = (conversationState) => {
                 
                 For dates, extract in one of these formats:
                 - YYYY-MM-DD (e.g., 2025-03-23) for specific dates
-                - "today", "tomorrow" for relative dates
+                - "today", "tomorrow", "day after tomorrow" for relative dates
                 - "next Monday", "next week" for day references
                 - "in 3 days", "in 2 weeks" for duration-based dates
                 
@@ -307,19 +334,6 @@ const getSystemPrompt = (conversationState) => {
 
                 For relative times like "in X minutes" or "in X hours", extract as:
                 { "relativeTime": { "unit": "minutes|hours", "amount": X } }
-                
-                For recurrence patterns, extract details like:
-                - "daily", "weekly", "monthly" for simple recurrence
-                - For complex patterns like "every other Tuesday until December", extract as:
-                {
-                  "recurrenceType": "custom",
-                  "pattern": {
-                    "frequency": "week",
-                    "interval": 2,  // 1 = every, 2 = every other, 3 = every third, etc.
-                    "dayOfWeek": 2  // 0 = Sunday, 1 = Monday, 2 = Tuesday, etc.
-                  },
-                  "endDate": "2025-12-31"  // Extract end date if specified
-                }
                 
                 Today's date is ${format(new Date(), 'yyyy-MM-dd')}.
                 

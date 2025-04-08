@@ -59,12 +59,12 @@ class DateParserService {
     }
 
     /**
-  * Parse date and time from LLM response and convert to user's timezone
-  * @param {Object} dateTimeInfo - The date and time information from LLM
-  * @param {String} userId - User ID for preferences
-  * @param {String} timezone - The user's timezone
-  * @returns {Date} - JavaScript Date object in user's timezone
-  */
+     * Parse date and time from LLM response and convert to user's timezone
+     * @param {Object} dateTimeInfo - The date and time information from LLM
+     * @param {String} userId - User ID for preferences
+     * @param {String} timezone - The user's timezone
+     * @returns {Date} - JavaScript Date object in user's timezone
+     */
     async parseDateTime(dateTimeInfo, userId, timezone = 'Asia/Kolkata') {
         let { date, time, timeReference, relativeTime } = dateTimeInfo;
         const now = new Date();
@@ -124,8 +124,14 @@ class DateParserService {
                 return parsedDate;
             }
 
+            // Special handling for "the day after tomorrow"
+            if (typeof date === 'string' && date.toLowerCase().includes('day after tomorrow')) {
+                console.log('Detected "day after tomorrow" date reference');
+                parsedDate = addDays(now, 2);
+                console.log(`Parsed date: ${parsedDate.toISOString()}`);
+            }
             // Validate date string first if it's not a relative date
-            if (date && !this.isRelativeDate(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            else if (date && !this.isRelativeDate(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
                 const validation = this.validateDateString(date);
                 if (!validation.valid) {
                     throw new Error(validation.message || 'Invalid date');
@@ -211,8 +217,10 @@ class DateParserService {
                 }
             }
 
-            // Standard date parsing
-            if (date) {
+            // We already handled "day after tomorrow" above, only proceed with standard date parsing
+            // if we haven't set parsedDate yet
+            if (!parsedDate && date) {
+                // Standard date parsing
                 // If it's a full date string (YYYY-MM-DD)
                 if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
                     parsedDate = parseISO(date);
@@ -450,6 +458,11 @@ class DateParserService {
             return { valid: true, isNone: true };
         }
 
+        // Handle "day after tomorrow" special case
+        if (dateStr.toLowerCase().includes('day after tomorrow')) {
+            return { valid: true };
+        }
+
         // Handle relative dates (these are always valid)
         if (this.isRelativeDate(dateStr)) {
             return { valid: true };
@@ -575,6 +588,11 @@ class DateParserService {
             /^this\s+\w+$/i
         ];
 
+        // Add special case for "day after tomorrow"
+        if (dateStr.toLowerCase().includes('day after tomorrow')) {
+            return true;
+        }
+
         return relativeDatePatterns.some(pattern => pattern.test(dateStr));
     }
 
@@ -602,7 +620,11 @@ class DateParserService {
         let resultDate;
 
         try {
-            if (relativeDate.toLowerCase() === 'today') {
+            // Special case for "day after tomorrow"
+            if (relativeDate.toLowerCase().includes('day after tomorrow')) {
+                resultDate = addDays(now, 2);
+            }
+            else if (relativeDate.toLowerCase() === 'today') {
                 resultDate = now;
             }
             else if (relativeDate.toLowerCase() === 'tomorrow') {
