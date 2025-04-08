@@ -10,11 +10,6 @@ const userPreferenceService = require('./userPreferenceService');
 const validationService = require('./validationService');
 
 
-/**
- * Process user message using OpenRouter LLM
- * @param {Object} user - User document from MongoDB
- * @param {String} messageText - Raw message text from user
- */
 const processUserMessage = async (user, messageText) => {
     try {
         // Extract conversation state from user or create a new one
@@ -25,7 +20,13 @@ const processUserMessage = async (user, messageText) => {
 
         // Extract recurrence pattern directly using the recurrence parser
         const recurrenceParserService = require('./recurrenceParserService');
-        const recurrenceInfo = recurrenceParserService.parseRecurrencePattern(messageText);
+
+        // Check if message actually contains recurrence-related keywords before parsing
+        const containsRecurrenceKeywords = containsRecurrenceTerms(messageText);
+
+        // Only get recurrence info if the message potentially contains recurrence terms
+        const recurrenceInfo = containsRecurrenceKeywords ?
+            recurrenceParserService.parseRecurrencePattern(messageText) : null;
 
         // Get completion from OpenRouter with Llama or another open-source model
         const openRouterResponse = await axios.post(
@@ -122,12 +123,14 @@ const processUserMessage = async (user, messageText) => {
                 }
             }
 
-            // Merge with recurrence info if available and applicable
-            if (nlpResponse.type === 'reminder' && recurrenceInfo) {
-                if (recurrenceInfo.recurrence) {
-                    nlpResponse.recurrence = recurrenceInfo.recurrence;
-                    nlpResponse.recurrencePattern = recurrenceInfo.recurrencePattern;
-                }
+            // FIXED: Only merge with recurrence info if the message actually contains recurrence terms
+            // and the LLM didn't already identify a recurrence pattern
+            if (nlpResponse.type === 'reminder' && containsRecurrenceKeywords &&
+                recurrenceInfo && recurrenceInfo.recurrence &&
+                (nlpResponse.recurrence === 'none' || !nlpResponse.recurrence)) {
+
+                nlpResponse.recurrence = recurrenceInfo.recurrence;
+                nlpResponse.recurrencePattern = recurrenceInfo.recurrencePattern;
 
                 if (recurrenceInfo.endDate) {
                     nlpResponse.endDate = recurrenceInfo.endDate;
@@ -172,6 +175,43 @@ const processUserMessage = async (user, messageText) => {
         );
     }
 };
+
+// Add a helper function to check if a message contains recurrence-related terms
+function containsRecurrenceTerms(message) {
+    if (!message) return false;
+
+    const lowerMessage = message.toLowerCase();
+
+    // List of terms that indicate recurrence intent
+    const recurrenceTerms = [
+        'every', 'daily', 'weekly', 'monthly', 'yearly',
+        'each', 'repeat', 'recurring', 'recur',
+        'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'
+    ];
+
+    // Check if the message contains terms like "every X" where X is day/week/month
+    const hasEveryPattern = /\bevery\s+(day|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(lowerMessage);
+
+    if (hasEveryPattern) return true;
+
+    // Check for other recurrence terms
+    const recurrenceTermFound = recurrenceTerms.some(term => {
+        // Use word boundary to ensure we match whole words
+        const regex = new RegExp(`\\b${term}\\b`, 'i');
+        return regex.test(lowerMessage);
+    });
+
+    // Check for "every X days/weeks/months" patterns
+    const everyXPattern = /\bevery\s+\d+\s+(day|days|week|weeks|month|months)\b/i.test(lowerMessage);
+
+    // Only daily/weekly/monthly on its own is not enough - need context
+    if (recurrenceTermFound && !['daily', 'weekly', 'monthly'].includes(lowerMessage.trim())) {
+        return true;
+    }
+
+    return everyXPattern;
+}
 
 /**
  * Get appropriate system prompt based on conversation state
