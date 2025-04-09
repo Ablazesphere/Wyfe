@@ -48,9 +48,9 @@ class NotificationService {
     }
 
     /**
-     * Send WhatsApp notification for reminder
-     * @param {Object} reminder - The reminder to send notification for
-     */
+ * Send WhatsApp notification for reminder
+ * @param {Object} reminder - The reminder to send notification for
+ */
     async sendWhatsAppNotification(reminder) {
         try {
             const user = reminder.user;
@@ -81,8 +81,8 @@ class NotificationService {
                 }
             }
 
-            // Add acknowledgment request
-            message += '\n\nReply "done" to mark as complete.';
+            // Add response options - updated to include delay option
+            message += '\n\nReply "done" to mark as complete or "delay" to reschedule.';
 
             // Send the notification
             await whatsappService.sendMessage(user.phoneNumber, message);
