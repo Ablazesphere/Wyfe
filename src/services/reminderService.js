@@ -323,9 +323,9 @@ const getRecentSentReminders = async (userId, limit = 5) => {
         const reminders = await Reminder.find({
             user: userId,
             status: 'sent',
-            scheduledFor: { $gte: recentTime }
+            scheduledFor: { $lte: new Date() } // Changed from $gte to $lte - look for reminders scheduled before now
         })
-            .sort({ scheduledFor: -1 })
+            .sort({ scheduledFor: -1 }) // Most recent first
             .limit(limit);
 
         return reminders;

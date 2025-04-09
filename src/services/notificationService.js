@@ -82,7 +82,7 @@ class NotificationService {
             }
 
             // Add response options - updated to include delay option
-            message += '\n\nReply "done" to mark as complete or "delay" to reschedule.';
+            message += '\n\nReply "done" to mark as complete, or "delay 30 mins" to reschedule.';
 
             // Send the notification
             await whatsappService.sendMessage(user.phoneNumber, message);

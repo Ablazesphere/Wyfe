@@ -2,6 +2,7 @@
 
 const { processUserMessage } = require('../services/nlpService');
 const User = require('../models/USER.JS');
+const Reminder = require('../models/reminder');
 const reminderService = require('../services/reminderService'); // Added missing import
 const whatsappService = require('../services/whatsappService');
 const dateParserService = require('../services/dateParserService');
@@ -150,6 +151,7 @@ const handleReminderResponse = async (user, messageText) => {
 
         if (recentReminders && recentReminders.length > 0) {
             const reminder = recentReminders[0];
+            console.log('Found recent reminder:', reminder.content);
 
             if (isExactMatch || isPatternMatch) {
                 console.log('Handling completion response');
@@ -215,6 +217,60 @@ const handleReminderResponse = async (user, messageText) => {
                 await user.save();
 
                 return true; // Message was handled as a delay request
+            }
+        } else if (isDelayRequest) {
+            // Still handle delay requests even if no recent reminder was found
+            console.log('Delay request detected but no recent reminder found');
+
+            // Fetch all pending reminders for this user
+            const pendingReminders = await Reminder.find({
+                user: user._id,
+                status: 'pending'
+            }).sort({ scheduledFor: 1 }).limit(1);
+
+            if (pendingReminders && pendingReminders.length > 0) {
+                // Use the next upcoming reminder
+                const upcomingReminder = pendingReminders[0];
+                console.log('Found upcoming reminder to delay:', upcomingReminder.content);
+
+                // Extract delay time information
+                const delayInfo = extractDelayInfo(messageText);
+                let newScheduledTime;
+
+                if (delayInfo.minutes > 0) {
+                    // Use the extracted minutes from the original scheduled time
+                    newScheduledTime = new Date(upcomingReminder.scheduledFor.getTime() + delayInfo.minutes * 60 * 1000);
+                } else {
+                    // Default to 30 minutes from now
+                    newScheduledTime = new Date(Date.now() + 30 * 60 * 1000);
+                }
+
+                // Update the reminder with the new time
+                await reminderService.updateReminder(upcomingReminder._id, {
+                    scheduledFor: newScheduledTime
+                });
+
+                // Format the new time for display
+                const formattedTime = dateParserService.formatDateForDisplay(newScheduledTime);
+
+                // Send confirmation message
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    `⏰ Reminder "${upcomingReminder.content}" rescheduled for ${formattedTime}`
+                );
+
+                // Reset conversation state
+                user.conversationState = { stage: 'initial' };
+                await user.save();
+
+                return true; // Message was handled as a delay request
+            } else {
+                // No reminders found to delay
+                await whatsappService.sendMessage(
+                    user.phoneNumber,
+                    "I don't see any active reminders to delay. Would you like to set a new reminder?"
+                );
+                return true; // We still handled this as a reminder response
             }
         }
 
