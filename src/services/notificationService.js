@@ -18,6 +18,16 @@ try {
  * Service for handling notifications
  */
 class NotificationService {
+    constructor() {
+        // Keep track of processed reminders to prevent duplicates
+        this.processedReminderIds = new Set();
+        // Clear the set every 30 minutes to avoid memory leaks
+        setInterval(() => {
+            console.log(`Clearing processed reminder IDs cache. Size before clearing: ${this.processedReminderIds.size}`);
+            this.processedReminderIds.clear();
+        }, 30 * 60 * 1000); // 30 minutes
+    }
+
     /**
      * Process notifications for due reminders and handle recurrence
      */
@@ -29,7 +39,18 @@ class NotificationService {
             console.log(`Processing ${dueReminders.length} due reminders`);
 
             for (const reminder of dueReminders) {
-                console.log(`Processing reminder ${reminder._id} with method: ${reminder.notificationMethod}`);
+                const reminderId = reminder._id.toString();
+
+                // Skip if we've already processed this reminder recently
+                if (this.processedReminderIds.has(reminderId)) {
+                    console.log(`Skipping already processed reminder ${reminderId}`);
+                    continue;
+                }
+
+                // Mark as processed
+                this.processedReminderIds.add(reminderId);
+
+                console.log(`Processing reminder ${reminderId} with method: ${reminder.notificationMethod}`);
 
                 // Send notification based on user's preference
                 if (reminder.notificationMethod === 'whatsapp' || reminder.notificationMethod === 'both') {
@@ -37,7 +58,7 @@ class NotificationService {
                 }
 
                 if (reminder.notificationMethod === 'voice' || reminder.notificationMethod === 'both') {
-                    console.log(`Voice notification needed for reminder ${reminder._id}`);
+                    console.log(`Voice notification needed for reminder ${reminderId}`);
                     if (!voiceService) {
                         console.error('Cannot send voice notification: voiceService is not loaded');
                     } else {

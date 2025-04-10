@@ -14,7 +14,7 @@ const voiceRoutes = require('./routes/voiceRoutes');
 
 // Import services
 const audioStorageService = require('./services/audioStorageService');
-const streamingService = require('./services/streamingService'); // Add streaming service
+const streamingService = require('./services/streamingService');
 
 // Initialize express app
 const app = express();
@@ -35,6 +35,15 @@ app.use(cors()); // Enable CORS
 // Use raw body parser for Twilio webhook requests
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json()); // Parse JSON requests
+
+// Increase request timeout for streaming
+app.use((req, res, next) => {
+    // Set a longer timeout for streaming requests (5 minutes)
+    if (req.path.startsWith('/api/stream-audio')) {
+        req.setTimeout(300000); // 5 minutes in milliseconds
+    }
+    next();
+});
 
 // Create public directory for audio files
 const publicDir = path.join(__dirname, '../public');

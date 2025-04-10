@@ -4,6 +4,7 @@ const axios = require('axios');
 const { format } = require('date-fns');
 const reminderService = require('./reminderService');
 const audioStorageService = require('./audioStorageService');
+const streamingService = require('./streamingService');
 
 /**
  * Service for handling voice-based notifications using Twilio and ElevenLabs
@@ -26,9 +27,9 @@ class VoiceService {
             this.twilioClient = null;
         }
 
-        // Determine if we should use streaming or file storage
-        this.useStreaming = process.env.USE_STREAMING === 'true';
-        console.log(`Using ${this.useStreaming ? 'streaming' : 'file storage'} mode for voice synthesis`);
+        // Enable streaming by default
+        this.useStreaming = true;
+        console.log(`Using streaming mode for voice synthesis`);
     }
 
     /**
@@ -55,18 +56,17 @@ class VoiceService {
     }
 
     /**
-     * Get speech URL - either streaming or file-based depending on configuration
+     * Get speech URL - uses streaming instead of file-based approach
      * @param {String} text - The text to convert to speech
-     * @param {String} prefix - Optional prefix for the filename (if file-based)
+     * @param {String} prefix - Optional prefix for audio identification
      * @returns {Promise<String>} - URL to access the audio
      */
     async getSpeechUrl(text, prefix = 'speech') {
         if (this.useStreaming) {
             // Use the streaming service to get a URL to our streaming endpoint
-            // For simplicity, we'll use the file-based approach for now
-            return this.generateAndSaveSpeech(text, prefix);
+            return streamingService.getStreamingUrl(text);
         } else {
-            // Use the file-based approach
+            // Fallback to file-based approach if streaming is disabled
             return this.generateAndSaveSpeech(text, prefix);
         }
     }
@@ -175,6 +175,9 @@ class VoiceService {
             const twimlUrl = `${process.env.APP_URL}/api/voice/reminder-call?reminderId=${reminder._id}`;
             console.log(`Using TwiML URL: ${twimlUrl}`);
 
+            // Note: Can't modify Twilio client directly, so we'll use standard approach with increased timeout awareness
+            console.log('Making Twilio API call (this may take up to 60 seconds for long audio)');
+
             // Make the call
             const call = await this.twilioClient.calls.create({
                 url: twimlUrl,
@@ -198,6 +201,8 @@ class VoiceService {
                 console.error('Invalid phone number format. Phone number must be in E.164 format');
             } else if (error.code === 21212) {
                 console.error('The provided phone number is not a valid phone number');
+            } else if (error.message.includes('timeout')) {
+                console.error('Request timeout. This could be due to network issues or slow response from Twilio API.');
             }
 
             throw error;

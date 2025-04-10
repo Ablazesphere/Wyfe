@@ -35,22 +35,29 @@ class StreamingService {
                     return res.status(400).send('Text parameter is required');
                 }
 
-                console.log(`Streaming audio for text: ${text.substring(0, 50)}...`);
+                // Decode the text URL parameter
+                const decodedText = decodeURIComponent(text);
+                console.log(`Streaming audio for ID: ${audioId}`);
+                console.log(`Text content (first 100 chars): ${decodedText.substring(0, 100)}...`);
 
                 // Set appropriate headers for streaming audio
                 res.setHeader('Content-Type', 'audio/mpeg');
+                res.setHeader('Cache-Control', 'no-cache');
                 res.setHeader('Transfer-Encoding', 'chunked');
 
                 // Process SSML if present
-                let processedText = text;
-                if (text.trim().startsWith('<speak>') && text.trim().endsWith('</speak>')) {
-                    processedText = text
+                let processedText = decodedText;
+                if (decodedText.trim().startsWith('<speak>') && decodedText.trim().endsWith('</speak>')) {
+                    processedText = decodedText
                         .replace(/<speak>([\s\S]*)<\/speak>/, '$1')
                         .replace(/<break[^>]*>/g, ' ')
                         .replace(/<[^>]*>/g, '');
+
+                    console.log(`Processed SSML to plain text (first 100 chars): ${processedText.substring(0, 100)}...`);
                 }
 
-                // Make request to ElevenLabs
+                // Make request to ElevenLabs streaming API with increased timeout
+                console.log(`Making request to ElevenLabs streaming API`);
                 const response = await axios({
                     method: 'post',
                     url: `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}/stream`,
@@ -66,16 +73,22 @@ class StreamingService {
                         'xi-api-key': process.env.ELEVENLABS_API_KEY,
                         'Content-Type': 'application/json',
                     },
-                    responseType: 'stream'
+                    responseType: 'stream',
+                    timeout: 120000 // Increase timeout to 2 minutes for ElevenLabs API
                 });
 
                 // Pipe the audio stream directly to the response
+                console.log(`Streaming audio to client`);
                 response.data.pipe(res);
 
                 // Handle errors in the stream
                 response.data.on('error', (error) => {
                     console.error('Error in ElevenLabs stream:', error);
-                    res.end();
+                    if (!res.headersSent) {
+                        res.status(500).send('Streaming error');
+                    } else {
+                        res.end();
+                    }
                 });
 
                 // Log when the stream ends
@@ -84,6 +97,9 @@ class StreamingService {
                 });
             } catch (error) {
                 console.error('Error streaming audio from ElevenLabs:', error.message);
+                if (error.response) {
+                    console.error('ElevenLabs API error:', error.response.status, error.response.statusText);
+                }
 
                 // If headers haven't been sent yet, send error response
                 if (!res.headersSent) {
@@ -111,7 +127,10 @@ class StreamingService {
         const encodedText = encodeURIComponent(text);
 
         // Return URL to our proxy endpoint
-        return `${process.env.APP_URL}/api/stream-audio/${audioId}?text=${encodedText}`;
+        const url = `${process.env.APP_URL}/api/stream-audio/${audioId}?text=${encodedText}`;
+
+        console.log(`Created streaming URL: ${url.substring(0, 100)}...`);
+        return url;
     }
 }
 
