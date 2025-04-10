@@ -3,6 +3,7 @@
 const axios = require('axios');
 const { format } = require('date-fns');
 const reminderService = require('./reminderService');
+const audioStorageService = require('./audioStorageService'); // Add this line
 
 /**
  * Service for handling voice-based notifications using Twilio and ElevenLabs
@@ -50,18 +51,59 @@ class VoiceService {
     }
 
     /**
-     * Generate natural speech audio using ElevenLabs API
+     * Generate natural speech audio using ElevenLabs API and save it
      * @param {String} text - The text to convert to speech
-     * @returns {Promise<Buffer>} - Audio data as buffer
+     * @param {String} prefix - Optional prefix for the filename
+     * @returns {Promise<String>} - URL to access the audio file
      */
+    async generateAndSaveSpeech(text, prefix = 'speech') {
+        try {
+            // Generate the speech audio
+            const audioBuffer = await this.generateSpeech(text);
+
+            // Save the audio and get its URL
+            const audioUrl = await audioStorageService.saveAudio(audioBuffer, prefix);
+
+            return audioUrl;
+        } catch (error) {
+            console.error('Error generating and saving speech:', error);
+            throw error;
+        }
+    }
+
+    /**
+ * Generate natural speech audio using ElevenLabs API
+ * @param {String} text - The text or SSML to convert to speech
+ * @returns {Promise<Buffer>} - Audio data as buffer
+ */
     async generateSpeech(text) {
         try {
-            console.log(`Generating speech with ElevenLabs: "${text.substring(0, 50)}..."`);
+            // Log a shorter version of the text for clarity in logs
+            const logText = text.length > 100
+                ? `${text.substring(0, 100)}...`
+                : text;
+
+            console.log(`Generating speech with ElevenLabs: "${logText}"`);
+
+            // Check if the text is SSML (has <speak> tags)
+            const isSSML = text.trim().startsWith('<speak>') && text.trim().endsWith('</speak>');
+
+            // Process SSML if present
+            let processedText = text;
+            if (isSSML) {
+                // Extract content from SSML
+                processedText = text
+                    .replace(/<speak>([\s\S]*)<\/speak>/, '$1')
+                    .replace(/<break[^>]*>/g, ' ') // Replace breaks with spaces
+                    .replace(/<[^>]*>/g, ''); // Remove any other tags
+
+                console.log(`Processed SSML to: "${processedText.substring(0, 100)}..."`);
+            }
 
             const response = await axios.post(
                 `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}`,
                 {
-                    text,
+                    text: processedText,
                     model_id: "eleven_monolingual_v1",
                     voice_settings: {
                         stability: 0.5,
@@ -117,7 +159,7 @@ class VoiceService {
                 url: twimlUrl,
                 to: user.phoneNumber,
                 from: process.env.TWILIO_PHONE_NUMBER,
-                method: 'GET', // Add this line to explicitly use GET
+                method: 'GET', // Explicitly use GET
                 statusCallback: `${process.env.APP_URL}/api/voice/status-callback?reminderId=${reminder._id}`,
                 statusCallbackMethod: 'POST'
             });

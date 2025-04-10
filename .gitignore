@@ -34,3 +34,6 @@ node_modules/
 *.njsproj
 *.sln
 *.sw?
+
+# Audio files
+*.mp3 

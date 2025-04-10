@@ -23,7 +23,8 @@
     "mongodb": "^6.15.0",
     "mongoose": "^8.12.2",
     "node-cron": "^3.0.3",
-    "twilio": "^5.5.2"
+    "twilio": "^5.5.2",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"
