@@ -117,6 +117,7 @@ class VoiceService {
                 url: twimlUrl,
                 to: user.phoneNumber,
                 from: process.env.TWILIO_PHONE_NUMBER,
+                method: 'GET', // Add this line to explicitly use GET
                 statusCallback: `${process.env.APP_URL}/api/voice/status-callback?reminderId=${reminder._id}`,
                 statusCallbackMethod: 'POST'
             });

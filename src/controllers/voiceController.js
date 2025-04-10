@@ -6,24 +6,87 @@ const User = require('../models/USER.JS');
 const voiceService = require('../services/voiceService');
 const reminderService = require('../services/reminderService');
 const dateParserService = require('../services/dateParserService');
+const mongoose = require('mongoose');
 
 /**
  * Generate TwiML for initial reminder call
  */
+// In src/controllers/voiceController.js
 const handleReminderCall = async (req, res) => {
+    console.log("=== REMINDER CALL HANDLER TRIGGERED ===");
+    console.log("Request URL:", req.originalUrl);
+    console.log("Reminder ID:", req.query.reminderId);
+
     const twiml = new VoiceResponse();
     const reminderId = req.query.reminderId;
 
     try {
-        // Get the reminder and make sure user is populated
-        const reminder = await Reminder.findById(reminderId).populate('user');
-
-        if (!reminder) {
-            twiml.say('Sorry, I could not find the reminder information.');
+        // Validate reminder ID format first
+        if (!reminderId || !reminderId.match(/^[0-9a-fA-F]{24}$/)) {
+            console.log("Invalid reminder ID format:", reminderId);
+            twiml.say('Sorry, the reminder ID format is invalid.');
             twiml.hangup();
             res.type('text/xml');
             return res.send(twiml.toString());
         }
+
+        console.log("Attempting to find reminder:", reminderId);
+
+        // Check MongoDB connection state
+        const connectionState = mongoose.connection.readyState;
+        console.log("MongoDB connection state:", connectionState); // 1 = connected
+
+        if (connectionState !== 1) {
+            console.log("MongoDB not connected");
+            twiml.say('Sorry, the database connection is unavailable.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
+        // Find reminder with robust error handling
+        let reminder;
+        try {
+            reminder = await Reminder.findById(reminderId);
+            console.log("Reminder search result:", reminder ? "Found" : "Not found");
+        } catch (dbError) {
+            console.error("Database error when finding reminder:", dbError);
+            twiml.say('Sorry, there was a database error when finding your reminder.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
+        if (!reminder) {
+            console.log("Reminder not found with ID:", reminderId);
+            twiml.say('Sorry, I could not find the reminder with the provided ID.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
+        // Now try to populate the user
+        try {
+            await reminder.populate('user');
+            console.log("User populated successfully:", reminder.user ? "Yes" : "No");
+        } catch (populateError) {
+            console.error("Error populating user:", populateError);
+            twiml.say('Sorry, there was an error retrieving user information for this reminder.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
+        if (!reminder.user) {
+            console.log("User not found for reminder:", reminderId);
+            twiml.say('Sorry, the user associated with this reminder was not found.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
+        // Continue with normal flow
+        console.log("Found reminder:", reminder._id, "for user:", reminder.user.phoneNumber);
 
         // Get time-appropriate greeting
         const hour = new Date().getHours();

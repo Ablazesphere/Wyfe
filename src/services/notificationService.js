@@ -37,11 +37,17 @@ class NotificationService {
                 }
 
                 if (reminder.notificationMethod === 'voice' || reminder.notificationMethod === 'both') {
-                    console.log(`Attempting voice notification for reminder ${reminder._id}`);
+                    console.log(`Voice notification needed for reminder ${reminder._id}`);
                     if (!voiceService) {
                         console.error('Cannot send voice notification: voiceService is not loaded');
                     } else {
-                        await this.sendVoiceNotification(reminder);
+                        console.log('voiceService is loaded, attempting to send notification');
+                        try {
+                            await this.sendVoiceNotification(reminder);
+                            console.log('Voice notification completed successfully');
+                        } catch (error) {
+                            console.error('Voice notification failed with error:', error);
+                        }
                     }
                 }
 
