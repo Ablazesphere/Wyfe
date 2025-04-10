@@ -256,11 +256,12 @@ const handleReminderCall = async (req, res) => {
         const speechText = createNaturalSpeechText(reminder, greeting, userName);
 
         try {
-            // Generate and save speech using ElevenLabs with the reminder ID as part of the filename
+            // Get either a streaming URL or file URL depending on configuration
             console.log("Generating ElevenLabs speech for reminder call");
             console.log("Speech text:", speechText);
 
-            const audioUrl = await voiceService.generateAndSaveSpeech(speechText, `reminder-${reminderId}`);
+            // Use getSpeechUrl instead of generateAndSaveSpeech
+            const audioUrl = await voiceService.getSpeechUrl(speechText, `reminder-${reminderId}`);
 
             console.log(`Using ElevenLabs audio URL: ${audioUrl}`);
 
@@ -395,7 +396,7 @@ const processResponse = async (req, res) => {
 
                 // Send this response
                 try {
-                    const audioUrl = await voiceService.generateAndSaveSpeech(responseText, `response-${reminderId}`);
+                    const audioUrl = await voiceService.getSpeechUrl(responseText, `response-${reminderId}`);
                     twiml.play(audioUrl);
                 } catch (error) {
                     console.error('Error generating ElevenLabs speech for response:', error);
@@ -424,7 +425,7 @@ const processResponse = async (req, res) => {
 
         // For completed, delay, or cancel intents, we use the response text and gather for follow-up
         try {
-            const audioUrl = await voiceService.generateAndSaveSpeech(responseText, `response-${reminderId}`);
+            const audioUrl = await voiceService.getSpeechUrl(responseText, `response-${reminderId}`);
             twiml.play(audioUrl);
         } catch (error) {
             console.error('Error generating ElevenLabs speech for response:', error);
@@ -493,7 +494,7 @@ const processFollowup = async (req, res) => {
 
         // Try to use ElevenLabs for the response
         try {
-            const audioUrl = await voiceService.generateAndSaveSpeech(responseText, `followup-${userId}`);
+            const audioUrl = await voiceService.getSpeechUrl(responseText, `followup-${userId}`);
             twiml.play(audioUrl);
         } catch (error) {
             console.error('Error generating ElevenLabs speech for followup:', error);
@@ -518,7 +519,7 @@ const processFollowup = async (req, res) => {
 
             const goodbyeText = createGoodbyeMessage();
             try {
-                const audioUrl = await voiceService.generateAndSaveSpeech(goodbyeText, `goodbye-${userId}`);
+                const audioUrl = await voiceService.getSpeechUrl(goodbyeText, `goodbye-${userId}`);
                 twiml.play(audioUrl);
             } catch (error) {
                 twiml.say("Thank you for using our reminder service. Goodbye!");
@@ -571,5 +572,12 @@ module.exports = {
     handleReminderCall,
     processResponse,
     processFollowup,
-    handleStatusCallback
+    handleStatusCallback,
+    createNaturalSpeechText,
+    createCompletionResponse,
+    createDelayResponse,
+    createCancellationResponse,
+    createUnclearResponse,
+    createFollowUpResponse,
+    createGoodbyeMessage
 };

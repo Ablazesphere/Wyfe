@@ -14,6 +14,7 @@ const voiceRoutes = require('./routes/voiceRoutes');
 
 // Import services
 const audioStorageService = require('./services/audioStorageService');
+const streamingService = require('./services/streamingService'); // Add streaming service
 
 // Initialize express app
 const app = express();
@@ -41,6 +42,9 @@ app.use(express.static(publicDir));
 
 // Configure audio storage service to serve files
 audioStorageService.configureExpressForAudio(app);
+
+// Set up streaming endpoints
+streamingService.setupStreamingEndpoints(app);
 
 // Routes
 app.use('/api', webhookRoutes);

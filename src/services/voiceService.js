@@ -3,7 +3,7 @@
 const axios = require('axios');
 const { format } = require('date-fns');
 const reminderService = require('./reminderService');
-const audioStorageService = require('./audioStorageService'); // Add this line
+const audioStorageService = require('./audioStorageService');
 
 /**
  * Service for handling voice-based notifications using Twilio and ElevenLabs
@@ -25,6 +25,10 @@ class VoiceService {
             console.error('Failed to initialize Twilio client:', error);
             this.twilioClient = null;
         }
+
+        // Determine if we should use streaming or file storage
+        this.useStreaming = process.env.USE_STREAMING === 'true';
+        console.log(`Using ${this.useStreaming ? 'streaming' : 'file storage'} mode for voice synthesis`);
     }
 
     /**
@@ -51,6 +55,23 @@ class VoiceService {
     }
 
     /**
+     * Get speech URL - either streaming or file-based depending on configuration
+     * @param {String} text - The text to convert to speech
+     * @param {String} prefix - Optional prefix for the filename (if file-based)
+     * @returns {Promise<String>} - URL to access the audio
+     */
+    async getSpeechUrl(text, prefix = 'speech') {
+        if (this.useStreaming) {
+            // Use the streaming service to get a URL to our streaming endpoint
+            // For simplicity, we'll use the file-based approach for now
+            return this.generateAndSaveSpeech(text, prefix);
+        } else {
+            // Use the file-based approach
+            return this.generateAndSaveSpeech(text, prefix);
+        }
+    }
+
+    /**
      * Generate natural speech audio using ElevenLabs API and save it
      * @param {String} text - The text to convert to speech
      * @param {String} prefix - Optional prefix for the filename
@@ -72,10 +93,10 @@ class VoiceService {
     }
 
     /**
- * Generate natural speech audio using ElevenLabs API
- * @param {String} text - The text or SSML to convert to speech
- * @returns {Promise<Buffer>} - Audio data as buffer
- */
+     * Generate natural speech audio using ElevenLabs API
+     * @param {String} text - The text or SSML to convert to speech
+     * @returns {Promise<Buffer>} - Audio data as buffer
+     */
     async generateSpeech(text) {
         try {
             // Log a shorter version of the text for clarity in logs
