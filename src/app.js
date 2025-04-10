@@ -9,6 +9,7 @@ require('dotenv').config();
 
 // Import routes
 const webhookRoutes = require('./routes/webhookRoutes');
+const voiceRoutes = require('./routes/voiceRoutes'); // Add voice routes import
 
 // Initialize express app
 const app = express();
@@ -25,10 +26,14 @@ mongoose
 // Middleware
 app.use(helmet()); // Security headers
 app.use(cors()); // Enable CORS
+
+// Use raw body parser for Twilio webhook requests
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json()); // Parse JSON requests
 
 // Routes
 app.use('/api', webhookRoutes);
+app.use('/api/voice', voiceRoutes); // Add voice routes
 
 // Health check endpoint
 app.get('/health', (req, res) => {

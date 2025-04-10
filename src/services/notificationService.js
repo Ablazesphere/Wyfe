@@ -5,6 +5,15 @@ const whatsappService = require('./whatsappService');
 const dateParserService = require('./dateParserService');
 const { format } = require('date-fns');
 
+// Explicitly import voiceService with error handling
+let voiceService;
+try {
+    voiceService = require('./voiceService');
+    console.log('VoiceService loaded successfully');
+} catch (error) {
+    console.error('Failed to load voiceService:', error);
+}
+
 /**
  * Service for handling notifications
  */
@@ -20,13 +29,20 @@ class NotificationService {
             console.log(`Processing ${dueReminders.length} due reminders`);
 
             for (const reminder of dueReminders) {
+                console.log(`Processing reminder ${reminder._id} with method: ${reminder.notificationMethod}`);
+
                 // Send notification based on user's preference
                 if (reminder.notificationMethod === 'whatsapp' || reminder.notificationMethod === 'both') {
                     await this.sendWhatsAppNotification(reminder);
                 }
 
                 if (reminder.notificationMethod === 'voice' || reminder.notificationMethod === 'both') {
-                    await this.sendVoiceNotification(reminder);
+                    console.log(`Attempting voice notification for reminder ${reminder._id}`);
+                    if (!voiceService) {
+                        console.error('Cannot send voice notification: voiceService is not loaded');
+                    } else {
+                        await this.sendVoiceNotification(reminder);
+                    }
                 }
 
                 // Update reminder status
@@ -48,9 +64,9 @@ class NotificationService {
     }
 
     /**
- * Send WhatsApp notification for reminder
- * @param {Object} reminder - The reminder to send notification for
- */
+     * Send WhatsApp notification for reminder
+     * @param {Object} reminder - The reminder to send notification for
+     */
     async sendWhatsAppNotification(reminder) {
         try {
             const user = reminder.user;
@@ -93,51 +109,56 @@ class NotificationService {
     }
 
     /**
-     * Send voice notification for reminder
+     * Send voice notification for reminder using Twilio and ElevenLabs
      * @param {Object} reminder - The reminder to send notification for
      */
     async sendVoiceNotification(reminder) {
         try {
-            const user = reminder.user;
+            console.log(`Starting voice notification process for reminder ${reminder._id}`);
 
-            // Build SSML script for voice message
-            let ssmlScript = `<speak>
-                <prosody rate="medium">
-                    This is a reminder: ${reminder.content}
-                </prosody>`;
+            // Check if reminder.user is populated
+            let user = reminder.user;
+            if (!user || typeof user === 'string' || !user.phoneNumber) {
+                console.log('User not populated in reminder, fetching user data');
+                const populatedReminder = await reminderService.getReminderById(reminder._id);
 
-            // Add recurrence info if applicable
-            if (reminder.recurrence !== 'none') {
-                const recurrenceParserService = require('./recurrenceParserService');
-                const recurrencePattern = reminder.recurrencePattern;
-                const endDate = reminder.endDate;
-
-                if (recurrencePattern) {
-                    // Calculate next occurrence date
-                    const nextDate = recurrenceParserService.calculateNextOccurrence(
-                        reminder.scheduledFor,
-                        recurrencePattern,
-                        endDate
-                    );
-
-                    if (nextDate) {
-                        const formattedNextDate = format(nextDate, 'EEEE, MMMM do, yyyy');
-                        ssmlScript += `
-                        <break time="500ms"/>
-                        <prosody rate="medium">
-                            Your next reminder is scheduled for ${formattedNextDate}
-                        </prosody>`;
-                    }
+                if (!populatedReminder || !populatedReminder.user) {
+                    throw new Error(`Could not find reminder ${reminder._id} or its user`);
                 }
+
+                reminder = populatedReminder;
+                user = reminder.user;
             }
 
-            ssmlScript += `</speak>`;
+            console.log(`Preparing voice call to ${user.phoneNumber}`);
 
-            // TODO: Implement voice call notification using Twilio and ElevenLabs
-            // This is a placeholder for the actual implementation
-            console.log(`Would send voice notification to ${user.phoneNumber} with SSML:`, ssmlScript);
+            // Verify Twilio and ElevenLabs environment variables are set
+            if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+                throw new Error('Missing Twilio credentials in environment variables');
+            }
+
+            // Make the voice call using voiceService
+            try {
+                await voiceService.makeReminderCall(reminder);
+                console.log(`Successfully initiated voice call for reminder to ${user.phoneNumber}`);
+            } catch (callError) {
+                console.error(`Error in voiceService.makeReminderCall:`, callError);
+                throw callError;
+            }
         } catch (error) {
-            console.error('Error sending voice notification:', error);
+            console.error(`Error sending voice notification for reminder ${reminder._id}:`, error);
+
+            // Log detailed error for troubleshooting
+            if (error.response) {
+                // API error response
+                console.error('API Error Response:', error.response.data);
+            } else if (error.request) {
+                // No response received
+                console.error('No response received from API');
+            }
+
+            // Don't retry here - we'll handle retries via the Twilio status callback
+            console.log(`Voice notification failed for reminder ${reminder._id}, will be handled by status callback`);
         }
     }
 
