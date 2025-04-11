@@ -248,6 +248,21 @@ class VoiceService {
     }
 
     /**
+     * Check if user wants to create a new reminder
+     * @param {String} text - User's speech text
+     * @returns {Boolean} - Whether user wants to create a reminder
+     */
+    userWantsCreateReminder(text) {
+        const createPatterns = [
+            'remind me', 'set a reminder', 'create a reminder',
+            'new reminder', 'make a reminder', 'add a reminder',
+            'schedule', 'remind', 'set up a', 'create a new'
+        ];
+
+        return createPatterns.some(pattern => text.includes(pattern));
+    }
+
+    /**
      * Process the result of a speech recognition response
      * @param {String} speechResult - The text captured from user's speech
      * @returns {Object} - Analyzed intent

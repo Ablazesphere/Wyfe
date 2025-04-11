@@ -9,6 +9,11 @@ router.route('/reminder-call')
     .get(voiceController.handleReminderCall)
     .post(voiceController.handleReminderCall);
 
+
+router.get('/create-reminder', voiceController.handleCreateReminder);
+router.post('/create-reminder-content', voiceController.processReminderContent);
+router.post('/create-reminder-time', voiceController.processReminderTime);
+
 // Route for processing user's speech response
 router.post('/process-response', voiceController.processResponse);
 
