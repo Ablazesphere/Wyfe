@@ -3,7 +3,6 @@
 const express = require('express');
 const router = express.Router();
 const voiceController = require('../controllers/voiceController');
-const VoiceResponse = require('twilio').twiml.VoiceResponse; // Add this line
 
 // Route for initial reminder call TwiML generation
 router.route('/reminder-call')
@@ -18,6 +17,5 @@ router.post('/process-followup', voiceController.processFollowup);
 
 // Route for handling Twilio call status callbacks
 router.post('/status-callback', voiceController.handleStatusCallback);
-
 
 module.exports = router;

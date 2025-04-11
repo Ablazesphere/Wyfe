@@ -268,17 +268,20 @@ const handleReminderCall = async (req, res) => {
             // Play the ElevenLabs generated audio
             twiml.play(audioUrl);
 
-            // Gather the user's speech response
+            // Gather the user's speech response with improved parameters
             twiml.gather({
                 input: 'speech',
                 action: `/api/voice/process-response?reminderId=${reminderId}`,
                 method: 'POST',
                 speechTimeout: 'auto',
-                language: 'en-US'
+                language: 'en-US',
+                speechModel: 'phone_call',  // This helps with phone call audio
+                hints: 'yes,no,done,later,remind me later,completed,delay,cancel,reschedule', // Common responses
+                profanityFilter: 'false',  // Allow natural speech
+                enhanced: 'true'           // Use enhanced recognition when available
             });
 
-            // Add fallback in case user doesn't respond
-            // Use a more natural fallback message too
+            // Fallback in case user doesn't respond
             twiml.say({
                 voice: 'Polly.Amy',
                 language: 'en-US'
@@ -289,7 +292,6 @@ const handleReminderCall = async (req, res) => {
             console.log("Falling back to TwiML say for speech");
 
             // Fallback to regular TwiML say if ElevenLabs fails
-            // Still use more natural text, just without SSML
             const fallbackText = `${greeting} ${userName}. I'm calling about your reminder to ${reminder.content}. Have you had a chance to do this yet?`;
 
             twiml.say({
@@ -297,16 +299,19 @@ const handleReminderCall = async (req, res) => {
                 language: 'en-US'
             }, fallbackText);
 
-            // Gather the user's speech response
+            // Gather with improved parameters
             twiml.gather({
                 input: 'speech',
                 action: `/api/voice/process-response?reminderId=${reminderId}`,
                 method: 'POST',
                 speechTimeout: 'auto',
-                language: 'en-US'
+                language: 'en-US',
+                speechModel: 'phone_call',  // This helps with phone call audio
+                hints: 'yes,no,done,later,remind me later,completed,delay,cancel,reschedule', // Common responses
+                profanityFilter: 'false',  // Allow natural speech
+                enhanced: 'true'           // Use enhanced recognition when available
             });
 
-            // Add fallback in case user doesn't respond
             twiml.say('I didn\'t hear a response. Please check your reminder in the app. Goodbye.');
             twiml.hangup();
         }
@@ -335,8 +340,11 @@ const processResponse = async (req, res) => {
     const reminderId = req.query.reminderId;
     // Extract speech result from Twilio
     const speechResult = req.body.SpeechResult;
+    const confidence = req.body.Confidence;
 
     console.log(`Speech response for reminder ${reminderId}: "${speechResult}"`);
+    console.log(`Speech confidence: ${confidence}`);
+    console.log('Full request body:', JSON.stringify(req.body, null, 2));
 
     try {
         // Get the reminder
@@ -352,6 +360,8 @@ const processResponse = async (req, res) => {
         // Analyze speech content
         const analysis = voiceService.analyzeUserSpeech(speechResult);
         let responseText = '';
+
+        console.log('Speech analysis result:', analysis);
 
         // Handle different intents
         switch (analysis.intent) {
@@ -391,8 +401,15 @@ const processResponse = async (req, res) => {
 
             case 'unknown':
             default:
-                // Couldn't understand or ambiguous response
-                responseText = createUnclearResponse();
+                // If we received some speech but couldn't understand it
+                if (speechResult && speechResult.trim()) {
+                    console.log('Received speech but could not determine intent:', speechResult);
+                    responseText = createUnclearResponse();
+                } else {
+                    // If no speech detected at all
+                    console.log('No speech detected from user');
+                    responseText = `<speak>I didn't hear a response. Would you like me to remind you about ${reminder.content} again later?</speak>`;
+                }
 
                 // Send this response
                 try {
@@ -406,13 +423,15 @@ const processResponse = async (req, res) => {
                     }, "I'm not quite sure I understood. Would you like me to remind you about this again later?");
                 }
 
-                // Gather for clarification
+                // Gather for clarification with improved parameters
                 twiml.gather({
                     input: 'speech',
                     action: `/api/voice/process-response?reminderId=${reminderId}&retry=true`,
                     method: 'POST',
                     speechTimeout: 'auto',
-                    language: 'en-US'
+                    timerout: 'auto',
+                    language: 'en-IN',
+                    speechModel: 'experimental_conversations',
                 });
 
                 // Add fallback
@@ -449,13 +468,15 @@ const processResponse = async (req, res) => {
         const context = analysis.intent === 'completed' ? 'completed' :
             analysis.intent === 'delay' ? 'delayed' : 'cancelled';
 
-        // Gather for follow-up question
+        // Gather for follow-up question with improved parameters
         twiml.gather({
             input: 'speech',
             action: `/api/voice/process-followup?userId=${reminder.user._id}&context=${context}`,
             method: 'POST',
             speechTimeout: 'auto',
-            language: 'en-US'
+            timerout: 'auto',
+            language: 'en-IN',
+            speechModel: 'experimental_conversations',
         });
 
         // Add fallback
