@@ -65,7 +65,37 @@ const sendTemplateMessage = async (to, templateName, components) => {
     }
 };
 
+/**
+ * Format a reminder notification message based on status
+ * @param {String} action - Action type (completed, rescheduled, cancelled, etc.)
+ * @param {String} content - The reminder content
+ * @param {String} [additionalInfo] - Optional additional information like time
+ * @returns {String} - Formatted WhatsApp message
+ */
+const formatReminderStatusMessage = (action, content, additionalInfo = '') => {
+    switch (action) {
+        case 'completed':
+            return `✅ *Voice Call Update*: I've marked your reminder "${content}" as complete as per our phone conversation.`;
+
+        case 'rescheduled':
+            return `⏰ *Voice Call Update*: As requested during our call, I've rescheduled your reminder "${content}" for ${additionalInfo}.`;
+
+        case 'cancelled':
+            return `🚫 *Voice Call Update*: I've cancelled your reminder "${content}" as requested during our phone conversation.`;
+
+        case 'missed_call':
+            return `📞 *Missed Call*: I tried to call you about your reminder "${content}" but couldn't reach you. ${additionalInfo}`;
+
+        case 'continue_conversation':
+            return `📱 *Continue from Call*: You mentioned wanting to set a new reminder during our call. Please reply here with what you'd like to be reminded about and when. For example: "Remind me to call John tomorrow at 3pm"`;
+
+        default:
+            return `🔔 *Reminder Update*: ${content} ${additionalInfo ? '- ' + additionalInfo : ''}`;
+    }
+};
+
 module.exports = {
     sendMessage,
-    sendTemplateMessage
+    sendTemplateMessage,
+    formatReminderStatusMessage
 };

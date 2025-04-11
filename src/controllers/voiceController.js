@@ -6,6 +6,7 @@ const User = require('../models/USER.JS');
 const voiceService = require('../services/voiceService');
 const reminderService = require('../services/reminderService');
 const dateParserService = require('../services/dateParserService');
+const whatsappService = require('../services/whatsappService');
 const mongoose = require('mongoose');
 
 /**
@@ -274,11 +275,9 @@ const handleReminderCall = async (req, res) => {
                 action: `/api/voice/process-response?reminderId=${reminderId}`,
                 method: 'POST',
                 speechTimeout: 'auto',
-                language: 'en-US',
-                speechModel: 'phone_call',  // This helps with phone call audio
-                hints: 'yes,no,done,later,remind me later,completed,delay,cancel,reschedule', // Common responses
-                profanityFilter: 'false',  // Allow natural speech
-                enhanced: 'true'           // Use enhanced recognition when available
+                timerout: 'auto',
+                language: 'en-IN',
+                speechModel: 'experimental_conversations',         // Use enhanced recognition when available
             });
 
             // Fallback in case user doesn't respond
@@ -305,11 +304,9 @@ const handleReminderCall = async (req, res) => {
                 action: `/api/voice/process-response?reminderId=${reminderId}`,
                 method: 'POST',
                 speechTimeout: 'auto',
-                language: 'en-US',
-                speechModel: 'phone_call',  // This helps with phone call audio
-                hints: 'yes,no,done,later,remind me later,completed,delay,cancel,reschedule', // Common responses
-                profanityFilter: 'false',  // Allow natural speech
-                enhanced: 'true'           // Use enhanced recognition when available
+                timerout: 'auto',
+                language: 'en-IN',
+                speechModel: 'experimental_conversations',
             });
 
             twiml.say('I didn\'t hear a response. Please check your reminder in the app. Goodbye.');
@@ -360,6 +357,8 @@ const processResponse = async (req, res) => {
         // Analyze speech content
         const analysis = voiceService.analyzeUserSpeech(speechResult);
         let responseText = '';
+        // Create a message for WhatsApp notification
+        let whatsappMessage = '';
 
         console.log('Speech analysis result:', analysis);
 
@@ -369,6 +368,9 @@ const processResponse = async (req, res) => {
                 // User has completed the task
                 await reminderService.updateReminderStatus(reminder._id, 'acknowledged');
                 responseText = createCompletionResponse(reminder.content);
+
+                // Add WhatsApp confirmation message
+                whatsappMessage = `✅ *Voice Call Update*: I've marked your reminder "${reminder.content}" as complete as per our phone conversation.`;
                 break;
 
             case 'delay':
@@ -391,12 +393,18 @@ const processResponse = async (req, res) => {
                 // Format time for speech
                 const timeDisplay = dateParserService.formatDateForDisplay(newReminderTime);
                 responseText = createDelayResponse(timeDisplay);
+
+                // Add WhatsApp confirmation message
+                whatsappMessage = `⏰ *Voice Call Update*: As requested during our call, I've rescheduled your reminder "${reminder.content}" for ${timeDisplay}.`;
                 break;
 
             case 'cancel':
                 // User wants to cancel the reminder
                 await reminderService.updateReminderStatus(reminder._id, 'cancelled');
                 responseText = createCancellationResponse();
+
+                // Add WhatsApp confirmation message
+                whatsappMessage = `🚫 *Voice Call Update*: I've cancelled your reminder "${reminder.content}" as requested during our phone conversation.`;
                 break;
 
             case 'unknown':
@@ -440,6 +448,17 @@ const processResponse = async (req, res) => {
 
                 res.type('text/xml');
                 return res.send(twiml.toString());
+        }
+
+        // For completed, delay, or cancel intents, send a WhatsApp confirmation if we have a message
+        if (whatsappMessage && reminder.user && reminder.user.phoneNumber) {
+            try {
+                await whatsappService.sendMessage(reminder.user.phoneNumber, whatsappMessage);
+                console.log(`Sent WhatsApp confirmation to ${reminder.user.phoneNumber} for reminder ${reminderId}`);
+            } catch (whatsappError) {
+                console.error('Error sending WhatsApp confirmation:', whatsappError);
+                // Continue call flow even if WhatsApp message fails
+            }
         }
 
         // For completed, delay, or cancel intents, we use the response text and gather for follow-up
@@ -495,6 +514,7 @@ const processResponse = async (req, res) => {
     res.send(twiml.toString());
 };
 
+
 /**
  * Process follow-up responses after reminder is handled
  */
@@ -507,11 +527,38 @@ const processFollowup = async (req, res) => {
     console.log(`Follow-up response for user ${userId}: "${speechResult}"`);
 
     try {
+        // Get the user
+        const user = await User.findById(userId);
+        if (!user) {
+            console.log(`User not found for ID: ${userId}`);
+            twiml.say('Sorry, I could not find your user information.');
+            twiml.hangup();
+            res.type('text/xml');
+            return res.send(twiml.toString());
+        }
+
         // Simple check if user wants more help
         const wantsMoreHelp = voiceService.userSaidYes(speechResult?.toLowerCase());
 
+        // Check if it sounds like they're trying to set a new reminder
+        const newReminderKeywords = ['remind', 'new reminder', 'set reminder', 'create', 'schedule'];
+        const soundsLikeNewReminder = newReminderKeywords.some(keyword =>
+            speechResult?.toLowerCase().includes(keyword)
+        );
+
+        // Variable for WhatsApp message
+        let whatsappMessage = '';
+
         // Create appropriate follow-up response
-        const responseText = createFollowUpResponse(wantsMoreHelp);
+        let responseText = createFollowUpResponse(wantsMoreHelp);
+
+        // If they want to set a new reminder, handle that specially
+        if (soundsLikeNewReminder) {
+            responseText = `<speak>I'd be happy to help you set a new reminder! <break time="200ms"/> For the best experience, please send me a message on WhatsApp with the details of what you'd like to be reminded about and when. <break time="300ms"/> I've sent you a message there to continue.</speak>`;
+
+            // Send a WhatsApp message to continue the conversation
+            whatsappMessage = `📱 *Continue from Call*: You mentioned wanting to set a new reminder during our call. Please reply here with what you'd like to be reminded about and when. For example: "Remind me to call John tomorrow at 3pm"`;
+        }
 
         // Try to use ElevenLabs for the response
         try {
@@ -525,14 +572,29 @@ const processFollowup = async (req, res) => {
                 ? "I'd be happy to help with something else! You can manage your reminders through WhatsApp chat."
                 : "Thanks for using our reminder service. Have a great day!";
 
+            if (soundsLikeNewReminder) {
+                fallbackText = "I'd be happy to help you set a new reminder! For the best experience, please send me a message on WhatsApp with the details.";
+            }
+
             twiml.say({
                 voice: 'Polly.Amy',
                 language: 'en-US'
             }, fallbackText);
         }
 
+        // Send WhatsApp message if applicable
+        if (whatsappMessage && user.phoneNumber) {
+            try {
+                await whatsappService.sendMessage(user.phoneNumber, whatsappMessage);
+                console.log(`Sent WhatsApp follow-up to ${user.phoneNumber}`);
+            } catch (whatsappError) {
+                console.error('Error sending WhatsApp follow-up:', whatsappError);
+                // Continue call flow even if WhatsApp message fails
+            }
+        }
+
         // If they don't want more help, just end the call
-        if (!wantsMoreHelp) {
+        if (!wantsMoreHelp && !soundsLikeNewReminder) {
             twiml.hangup();
         } else {
             // If they want more help, add a pause and another message before ending
@@ -576,8 +638,44 @@ const handleStatusCallback = async (req, res) => {
         if (['busy', 'no-answer', 'failed', 'canceled'].includes(callStatus)) {
             console.log(`Call failed with status ${callStatus}, scheduling retry`);
 
-            // Schedule a retry after 10 minutes
-            await voiceService.scheduleCallRetry(reminderId, 10);
+            // Get the reminder and user details
+            const reminder = await Reminder.findById(reminderId).populate('user');
+
+            if (reminder && reminder.user) {
+                // Schedule a retry after 10 minutes
+                const retryReminder = await voiceService.scheduleCallRetry(reminderId, 10);
+
+                // Get the retry time for the message
+                const retryTime = dateParserService.formatDateForDisplay(retryReminder.scheduledFor);
+
+                // Prepare and send WhatsApp message about missed call
+                let missedCallMessage = '';
+                switch (callStatus) {
+                    case 'busy':
+                        missedCallMessage = `📞 *Missed Call*: I tried to call you about your reminder "${reminder.content}" but your line was busy. I'll try again at ${retryTime}.`;
+                        break;
+                    case 'no-answer':
+                        missedCallMessage = `📞 *Missed Call*: I tried to call you about your reminder "${reminder.content}" but there was no answer. I'll try again at ${retryTime}.`;
+                        break;
+                    default:
+                        missedCallMessage = `📞 *Missed Call*: I tried to call you about your reminder "${reminder.content}" but couldn't reach you. I'll try again at ${retryTime}.`;
+                }
+
+                // Send WhatsApp notification
+                try {
+                    await whatsappService.sendMessage(reminder.user.phoneNumber, missedCallMessage);
+                    console.log(`Sent missed call notification to ${reminder.user.phoneNumber}`);
+                } catch (whatsappError) {
+                    console.error('Error sending missed call notification:', whatsappError);
+                }
+            } else {
+                console.log(`Couldn't find reminder or user details for ID: ${reminderId}`);
+                // Still schedule the retry even if we can't send the notification
+                await voiceService.scheduleCallRetry(reminderId, 10);
+            }
+        } else if (callStatus === 'completed') {
+            // Call was successful, could log analytics here
+            console.log(`Call for reminder ${reminderId} completed successfully`);
         }
 
         // Send a 200 OK response
