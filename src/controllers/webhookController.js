@@ -81,16 +81,30 @@ const handleIncomingMessage = async (req, res) => {
             user.lastInteraction = new Date();
             await user.save();
 
-            // Check if this is a response to a reminder notification
-            const isReminderResponse = await handleReminderResponse(user, text.body);
+            // Check if this is a response to a reminder notification first
+            // Only try to handle it as a reminder response if there are pending reminders
+            const recentReminders = await reminderService.getRecentSentReminders(user._id, 1);
+            const pendingReminders = await Reminder.find({
+                user: user._id,
+                status: 'pending'
+            }).sort({ scheduledFor: 1 }).limit(1);
 
-            if (isReminderResponse) {
-                // The message was handled as a reminder response, no need for NLP processing
-                console.log('Handled as reminder response');
+            // If we have recent reminders or pending reminders, try to process as a response
+            if (recentReminders.length > 0 || pendingReminders.length > 0) {
+                const isReminderResponse = await handleReminderResponse(user, text.body);
+
+                if (isReminderResponse) {
+                    // The message was handled as a reminder response, no need for NLP processing
+                    console.log('Handled as reminder response');
+                    return; // Skip further processing
+                }
             } else {
-                // Process the message using NLP service
-                await processUserMessage(user, text.body);
+                console.log('No existing reminders found, will process as a new message');
             }
+
+            // If it wasn't handled as a reminder response or there are no existing reminders,
+            // process it as a regular message through the NLP service
+            await processUserMessage(user, text.body);
         }
 
         // Acknowledge receipt
@@ -135,13 +149,15 @@ const handleReminderResponse = async (user, messageText) => {
             /after/i,
             /remind.*again/i,
             /snooze/i,
-            /in\s+\d+\s*(minute|minutes|hour|hours)/i,
             /can you delay this/i,
             /move.*to/i
         ];
 
         const isExactMatch = completionKeywords.some(keyword => lowerMessage === keyword);
         const isPatternMatch = completionPatterns.some(pattern => pattern.test(lowerMessage));
+
+        // We now have a context-aware approach, so we're more confident this is a delay request
+        // if we get to this point (we've already verified we have existing reminders)
         const isDelayRequest = delayPatterns.some(pattern => pattern.test(lowerMessage));
 
         console.log('Is delay request:', isDelayRequest);
@@ -219,8 +235,8 @@ const handleReminderResponse = async (user, messageText) => {
                 return true; // Message was handled as a delay request
             }
         } else if (isDelayRequest) {
-            // Still handle delay requests even if no recent reminder was found
-            console.log('Delay request detected but no recent reminder found');
+            // Handle delay requests for pending reminders
+            console.log('Delay request detected for pending reminders');
 
             // Fetch all pending reminders for this user
             const pendingReminders = await Reminder.find({
