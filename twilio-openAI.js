@@ -20,10 +20,7 @@ const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-// Modify system message for the first greeting to be faster
-const INITIAL_SYSTEM_MESSAGE = 'You are an AI assistant who gives very brief initial greetings. Your first response should be a quick hello, no longer than 2-3 words.';
-
-// Full system message for normal conversation
+// System message for normal conversation
 const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.\n\n' +
   'VOICE INSTRUCTIONS (Important - follow these exactly):\n' +
   'Voice: Speak in a warm, upbeat, and friendly tone—like a close buddy who checks in with genuine care. Use a calm, steady rhythm with a little enthusiasm to keep things positive.\n' +
@@ -32,26 +29,18 @@ const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to c
   'Pronunciation: Speak clearly and expressively, with a smooth rhythm and slight Indian intonation. Emphasize key words just enough to keep the user engaged without sounding robotic.';
 
 // Voice settings
-const VOICE = 'shimmer'; // Using 'nova' instead of 'alloy' for a warmer tone
+const VOICE = 'shimmer';
 
-const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
+const PORT = process.env.PORT || 5050;
 
-// We'll optimize the connection flow instead of using pre-recorded greetings
-
-// List of Event Types to log to the console.
-const LOG_EVENT_TYPES = [
-  'error',
-  'response.content.done',
-  'rate_limits.updated',
-  'response.done',
-  'input_audio_buffer.committed',
-  'input_audio_buffer.speech_stopped',
+// List of key event types to process
+const KEY_EVENT_TYPES = [
+  'conversation.item.input_audio_transcription.delta',
+  'conversation.item.input_audio_transcription.completed',
+  'response.audio_transcript.done',
   'input_audio_buffer.speech_started',
-  'session.created'
+  'input_audio_buffer.speech_stopped'
 ];
-
-// Show AI response elapsed timing calculations
-const SHOW_TIMING_MATH = false;
 
 // Root Route
 fastify.get('/', async (request, reply) => {
@@ -72,7 +61,7 @@ fastify.all('/incoming-call', async (request, reply) => {
 
 // Initialize OpenAI connection pool
 const openAiConnectionPool = [];
-const MAX_POOL_SIZE = 5; // Increased pool size for better availability
+const MAX_POOL_SIZE = 5;
 
 // Pre-establish OpenAI connections for faster response
 function prepareOpenAiConnections() {
@@ -119,6 +108,9 @@ fastify.register(async (fastify) => {
     let markQueue = [];
     let responseStartTimestampTwilio = null;
     let sessionInitialized = false;
+    let currentUserTranscript = '';
+    let lastTranscriptId = null;
+
     // Get OpenAI connection from pool or create new one
     let openAiWs;
     if (openAiConnectionPool.length > 0) {
@@ -137,22 +129,6 @@ fastify.register(async (fastify) => {
     // Handle first response then update system message for normal conversation
     let isFirstResponse = true;
 
-    // Function to update system message after initial greeting
-    const updateToFullSystemMessage = () => {
-      if (!isFirstResponse) return;
-
-      console.log('Updating to full system message for normal conversation');
-      const fullSessionUpdate = {
-        type: 'session.update',
-        session: {
-          instructions: SYSTEM_MESSAGE
-        }
-      };
-
-      openAiWs.send(JSON.stringify(fullSessionUpdate));
-      isFirstResponse = false;
-    };
-
     // Control initial session with OpenAI
     const initializeSession = () => {
       if (sessionInitialized) return;
@@ -164,14 +140,18 @@ fastify.register(async (fastify) => {
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           voice: VOICE,
-          // Use simpler instructions for initial greeting
           instructions: SYSTEM_MESSAGE,
           modalities: ["text", "audio"],
-          temperature: 0.7, // Slightly lower temperature for faster responses
+          temperature: 0.7,
+          // Add transcription settings per documentation
+          input_audio_transcription: {
+            model: "gpt-4o-mini-transcribe",
+            language: "en"
+          }
         }
       };
 
-      console.log('Sending session update for fast greeting');
+      console.log('Sending session update');
       openAiWs.send(JSON.stringify(sessionUpdate));
       sessionInitialized = true;
 
@@ -179,7 +159,7 @@ fastify.register(async (fastify) => {
       sendInitialConversationItem();
     };
 
-    // Send initial conversation item with simplified greeting
+    // Send initial conversation item
     const sendInitialConversationItem = () => {
       const initialConversationItem = {
         type: 'conversation.item.create',
@@ -189,7 +169,6 @@ fastify.register(async (fastify) => {
           content: [
             {
               type: 'input_text',
-              // Use a shorter prompt for faster response generation
               text: 'Greet the user with "Hello there!"'
             }
           ]
@@ -199,7 +178,7 @@ fastify.register(async (fastify) => {
       console.log('Sending initial conversation item');
       openAiWs.send(JSON.stringify(initialConversationItem));
 
-      // Request immediate response with standard parameters
+      // Request immediate response
       openAiWs.send(JSON.stringify({
         type: 'response.create'
       }));
@@ -209,7 +188,6 @@ fastify.register(async (fastify) => {
     const handleSpeechStartedEvent = () => {
       if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
         const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
-        if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
 
         if (lastAssistantItem) {
           const truncateEvent = {
@@ -218,7 +196,6 @@ fastify.register(async (fastify) => {
             content_index: 0,
             audio_end_ms: elapsedTime
           };
-          if (SHOW_TIMING_MATH) console.log('Sending truncation event:', JSON.stringify(truncateEvent));
           openAiWs.send(JSON.stringify(truncateEvent));
         }
 
@@ -251,7 +228,7 @@ fastify.register(async (fastify) => {
     if (openAiWs.readyState === WebSocket.CONNECTING) {
       openAiWs.on('open', () => {
         console.log('Connected to the OpenAI Realtime API');
-        initializeSession(); // Initialize immediately without delay
+        initializeSession();
       });
     } else if (openAiWs.readyState === WebSocket.OPEN) {
       // If we're using a pre-warmed connection, initialize immediately
@@ -263,10 +240,28 @@ fastify.register(async (fastify) => {
       try {
         const response = JSON.parse(data);
 
-        if (LOG_EVENT_TYPES.includes(response.type)) {
-          console.log(`Received event: ${response.type}`, response);
+        // Handle the assistant's response transcript
+        if (response.type === 'response.audio_transcript.done') {
+          console.log(`\nASSISTANT: "${response.transcript}"`);
         }
 
+        // Handle OpenAI's transcription events (per documentation)
+        if (response.type === 'conversation.item.input_audio_transcription.delta') {
+          // For incremental transcript updates (delta events)
+          if (response.delta) {
+            currentUserTranscript += response.delta;
+          }
+        }
+
+        // Handle completed transcription events
+        if (response.type === 'conversation.item.input_audio_transcription.completed') {
+          if (response.transcript) {
+            console.log(`\nUSER: "${response.transcript}"`);
+            currentUserTranscript = '';
+          }
+        }
+
+        // Handle specific event types for the Twilio audio pipeline
         if (response.type === 'response.audio.delta' && response.delta) {
           const audioDelta = {
             event: 'media',
@@ -278,7 +273,6 @@ fastify.register(async (fastify) => {
           // First delta from a new response starts the elapsed time counter
           if (!responseStartTimestampTwilio) {
             responseStartTimestampTwilio = latestMediaTimestamp;
-            if (SHOW_TIMING_MATH) console.log(`Setting start timestamp for new response: ${responseStartTimestampTwilio}ms`);
           }
 
           if (response.item_id) {
@@ -288,16 +282,12 @@ fastify.register(async (fastify) => {
           sendMark(connection, streamSid);
         }
 
-        // After first response is completed, update to full system message
-        if (response.type === 'response.content.done' && isFirstResponse) {
-          updateToFullSystemMessage();
-        }
-
         if (response.type === 'input_audio_buffer.speech_started') {
           handleSpeechStartedEvent();
         }
+
       } catch (error) {
-        console.error('Error processing OpenAI message:', error, 'Raw message:', data);
+        console.error('Error processing OpenAI message:', error);
       }
     });
 
@@ -309,7 +299,6 @@ fastify.register(async (fastify) => {
         switch (data.event) {
           case 'media':
             latestMediaTimestamp = data.media.timestamp;
-            if (SHOW_TIMING_MATH) console.log(`Received media message with timestamp: ${latestMediaTimestamp}ms`);
             if (openAiWs.readyState === WebSocket.OPEN) {
               const audioAppend = {
                 type: 'input_audio_buffer.append',
@@ -327,9 +316,11 @@ fastify.register(async (fastify) => {
               initializeSession();
             }
 
-            // Reset start and media timestamp on a new stream
+            // Reset variables on a new stream
             responseStartTimestampTwilio = null;
             latestMediaTimestamp = 0;
+            currentUserTranscript = '';
+            lastTranscriptId = null;
             break;
           case 'mark':
             if (markQueue.length > 0) {
@@ -341,7 +332,7 @@ fastify.register(async (fastify) => {
             break;
         }
       } catch (error) {
-        console.error('Error parsing message:', error, 'Message:', message);
+        console.error('Error parsing message:', error);
       }
     });
 
