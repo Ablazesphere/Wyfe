@@ -5,33 +5,64 @@ import { createReminder, getReminder, updateReminderStatus, removeReminder } fro
 import { config } from '../config/config.js';
 
 /**
- * Extract reminder data from text transcript
+ * Extract reminder data from text transcript with a more flexible regex
  * @param {string} text The transcript text
  * @returns {Object|null} Extracted reminder data or null
  */
 export function extractReminderFromText(text) {
-    // Look for the special marker in the response
-    const reminderRegex = /{{REMINDER:\s*({.*?})}}/;
+    // More flexible regex pattern that can handle incomplete closing brackets
+    // and potential whitespace variations
+    const reminderRegex = /{{REMINDER:\s*({.*?"task".*?"time".*?"date".*?})}?/;
     const match = text.match(reminderRegex);
 
     if (match && match[1]) {
         try {
-            const reminderData = JSON.parse(match[1]);
+            // Clean up possible JSON issues (missing closing brackets)
+            let jsonString = match[1];
+            if (!jsonString.endsWith('}')) {
+                jsonString += '}';
+            }
+
+            // Try to parse the JSON
+            const reminderData = JSON.parse(jsonString);
 
             // Ensure we have all required fields
             if (!reminderData.task) {
-                logger.warn('Reminder missing task field');
+                console.warn('Reminder missing task field');
                 return null;
             }
 
-            if (!reminderData.time || !reminderData.date) {
-                logger.warn('Reminder missing time or date field');
+            if (!reminderData.time) {
+                console.warn('Reminder missing time field');
+                return null;
+            }
+
+            if (!reminderData.date) {
+                console.warn('Reminder missing date field');
                 return null;
             }
 
             return reminderData;
         } catch (error) {
-            logger.error('Failed to parse reminder JSON:', error);
+            console.error('Failed to parse reminder JSON:', error);
+
+            // Additional fallback parsing for severe JSON issues
+            try {
+                // Try to extract individual fields with regex if JSON parsing fails
+                const taskMatch = text.match(/"task"\s*:\s*"([^"]+)"/);
+                const timeMatch = text.match(/"time"\s*:\s*"([^"]+)"/);
+                const dateMatch = text.match(/"date"\s*:\s*"([^"]+)"/);
+
+                if (taskMatch && timeMatch && dateMatch) {
+                    return {
+                        task: taskMatch[1],
+                        time: timeMatch[1],
+                        date: dateMatch[1]
+                    };
+                }
+            } catch (fallbackError) {
+                console.error('Fallback parsing also failed:', fallbackError);
+            }
         }
     }
 
