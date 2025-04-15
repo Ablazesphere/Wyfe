@@ -1,12 +1,39 @@
-# Node.js
-node_modules/
+# Environment variables
+.env
+
+# Logs
+logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Logs
-package-lock.json
-yarn.lock
+# Dependency directories
+node_modules/
 
-# dotenv environment variable files
-.env
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Output of 'npm pack'
+*.tgz
+
+# dotenv environment variables file
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Audio files
+*.mp3 

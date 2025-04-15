@@ -1,20 +1,32 @@
 {
-  "name": "speech-assistant-openai-realtime-api-node",
-  "version": "1.0.1",
-  "description": "",
+  "name": "remainder",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module",
+  "description": "",
   "dependencies": {
-    "@fastify/formbody": "^8.0.0",
-    "@fastify/websocket": "^11.0.0",
-    "dotenv": "^16.4.5",
-    "fastify": "^5.0.0",
-    "ws": "^8.18.0"
+    "axios": "^1.8.4",
+    "body-parser": "^1.20.3",
+    "cors": "^2.8.5",
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0",
+    "mongodb": "^6.15.0",
+    "mongoose": "^8.12.2",
+    "node-cron": "^3.0.3",
+    "twilio": "^5.5.2",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
   }
 }
