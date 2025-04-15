@@ -30,7 +30,7 @@ const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to c
     '- For relative times (e.g., "in 5 minutes"), calculate the exact timestamp when the reminder should trigger\n' +
     '- For specific times (e.g., "at 3pm"), convert to a precise timestamp\n' +
     '- Always include the calculated time in your verbal response (e.g., "I\'ll remind you at 3:40 PM")\n\n' +
-    'Example: If a user says "Remind me to call Mom in 30 minutes" at 2:00 PM, respond with something like "I\'ll remind you to call Mom at 2:30 PM" and include {{REMINDER: {"task": "call Mom", "time": "2023-04-15T14:30:00.000Z"}}} at the end of your response.\n\n' +
+    'Example: If a user says "Remind me to call Mom in 30 minutes" at 2:00 PM, respond with something like "I\'ll remind you to call Mom at 2:30 PM" and include {{REMINDER: {"task": "call Mom", "time": "14:30", "date":"15/04/2025"}}} at the end of your response.\n\n' +
     'VOICE INSTRUCTIONS (Important - follow these exactly):\n' +
     'Voice: Speak in a warm, upbeat, and friendly tone—like a close buddy who checks in with genuine care. Use a calm, steady rhythm with a little enthusiasm to keep things positive.\n' +
     'Tone: Be supportive and encouraging, never pushy. Sound like someone who\'s rooting for the user, nudging them gently when needed.\n' +
@@ -56,7 +56,7 @@ const KEY_EVENT_TYPES = [
 const reminders = [];
 
 // Function to schedule a reminder
-function scheduleReminder(task, time, phoneNumber) {
+function scheduleReminder(task, time, date, phoneNumber) {
     const reminderData = {
         task,
         phoneNumber,
@@ -66,13 +66,19 @@ function scheduleReminder(task, time, phoneNumber) {
     let triggerTime;
     const now = new Date();
 
-    console.log(`Scheduling reminder with input time: ${time} (type: ${typeof time})`);
+    console.log(`Scheduling reminder with input time: ${time}, date: ${date} (time type: ${typeof time})`);
 
-    // Handle different time formats with better validation
-    if (typeof time === 'string' && time.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) !== null) {
-        // ISO format date (e.g., "2025-04-15T12:19:00.000Z")
+    // Handle time in "HH:MM" format with date in "dd/mm/yyyy" format
+    if (typeof time === 'string' && typeof date === 'string') {
         try {
-            triggerTime = new Date(time);
+            // Parse time in "HH:MM" format
+            const [hours, minutes] = time.split(':').map(num => parseInt(num, 10));
+
+            // Parse date in "dd/mm/yyyy" format
+            const [day, month, year] = date.split('/').map(num => parseInt(num, 10));
+
+            // Month is 0-indexed in JavaScript Date
+            triggerTime = new Date(year, month - 1, day, hours, minutes, 0);
 
             // Validate the date object
             if (isNaN(triggerTime.getTime())) {
@@ -80,10 +86,9 @@ function scheduleReminder(task, time, phoneNumber) {
             }
 
             reminderData.triggerTime = triggerTime;
-            console.log(`Interpreted as ISO timestamp: ${time}`);
-            console.log(`Parsed to: ${triggerTime.toISOString()}`);
+            console.log(`Parsed time and date to: ${triggerTime.toISOString()}`);
         } catch (err) {
-            console.error(`Error parsing ISO timestamp: ${time}`, err);
+            console.error(`Error parsing time/date: ${time}, ${date}`, err);
             // Fall back to default
             triggerTime = new Date(now.getTime() + 5 * 60000);
             reminderData.triggerTime = triggerTime;
@@ -114,8 +119,8 @@ function scheduleReminder(task, time, phoneNumber) {
         reminderData.triggerTime = triggerTime;
         console.log(`Interpreted as ${minutes} minutes from now`);
     } else {
-        // Unrecognized format - default to 5 minutes
-        console.warn(`Couldn't parse time format: ${time}, defaulting to 5 minutes`);
+        // Default to 5 minutes from now for any other format
+        console.warn(`Couldn't parse time format: ${time}, ${date}, defaulting to 5 minutes`);
         triggerTime = new Date(now.getTime() + 5 * 60000);
         reminderData.triggerTime = triggerTime;
     }
@@ -156,6 +161,7 @@ function scheduleReminder(task, time, phoneNumber) {
 
     return reminderData;
 }
+
 // Function to execute a reminder
 function executeReminder(reminderId) {
     const index = reminders.findIndex(r => r.id === reminderId);
@@ -189,7 +195,20 @@ function extractReminderFromText(text) {
 
     if (match && match[1]) {
         try {
-            return JSON.parse(match[1]);
+            const reminderData = JSON.parse(match[1]);
+
+            // Ensure we have all required fields
+            if (!reminderData.task) {
+                console.warn('Reminder missing task field');
+                return null;
+            }
+
+            if (!reminderData.time || !reminderData.date) {
+                console.warn('Reminder missing time or date field');
+                return null;
+            }
+
+            return reminderData;
         } catch (error) {
             console.error('Failed to parse reminder JSON:', error);
         }
@@ -432,7 +451,7 @@ fastify.register(async (fastify) => {
             // Check if the transcript contains reminder data
             const reminderData = extractReminderFromText(transcript);
 
-            if (reminderData && reminderData.task && reminderData.time) {
+            if (reminderData && reminderData.task && reminderData.time && reminderData.date) {
                 console.log('Detected reminder request:', reminderData);
                 console.log(`Current system time: ${new Date().toISOString()}`);
 
@@ -440,6 +459,7 @@ fastify.register(async (fastify) => {
                 const reminder = scheduleReminder(
                     reminderData.task,
                     reminderData.time,
+                    reminderData.date,
                     callerPhoneNumber || 'unknown'
                 );
 
