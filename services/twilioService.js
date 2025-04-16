@@ -1,7 +1,20 @@
-// services/twilioService.js - Twilio media stream handling
+// Updated twilioService.js with confirmation flow integration
 import { logger } from '../utils/logger.js';
-import { getOpenAiConnection, initializeSession, sendInitialConversation, truncateAssistantResponse, sendAudioBuffer, sendTimeUpdate, returnConnectionToPool } from './openaiService.js';
+import {
+    getOpenAiConnection,
+    initializeSession,
+    sendInitialConversation,
+    truncateAssistantResponse,
+    sendAudioBuffer,
+    sendTimeUpdate,
+    returnConnectionToPool,
+    sendSystemMessage
+} from './openaiService.js';
 import { processAssistantResponseForReminders } from './reminderService.js';
+import {
+    getPendingConfirmation,
+    processConfirmationResponse
+} from '../utils/confirmationHandler.js';
 
 /**
  * Create a Twilio Media Stream handler
@@ -23,7 +36,8 @@ export function setupMediaStreamHandler(connection, req) {
         lastTranscriptId: null,
         callerPhoneNumber: null,
         currentAssistantResponse: '',
-        timeUpdateInterval: null
+        timeUpdateInterval: null,
+        awaitingConfirmation: false
     };
 
     // Extract caller phone number from Twilio if available
@@ -81,6 +95,70 @@ export function setupMediaStreamHandler(connection, req) {
         }
     };
 
+    /**
+     * Process user's transcribed input for confirmations
+     * @param {string} transcript User's transcribed input
+     */
+    const processUserInput = (transcript) => {
+        // Check if we're awaiting confirmation
+        if (state.callerPhoneNumber) {
+            const pendingConfirmation = getPendingConfirmation(state.callerPhoneNumber);
+
+            if (pendingConfirmation) {
+                state.awaitingConfirmation = true;
+                const confirmationResult = processConfirmationResponse(state.callerPhoneNumber, transcript);
+
+                if (confirmationResult) {
+                    if (confirmationResult.confirmed) {
+                        // User confirmed the action, process it
+                        const result = processAssistantResponseForReminders(
+                            JSON.stringify({
+                                action: confirmationResult.action,
+                                task: confirmationResult.data.task,
+                                time: confirmationResult.data.time,
+                                date: confirmationResult.data.date
+                            }),
+                            state.callerPhoneNumber
+                        );
+
+                        // Provide feedback to the user via system message
+                        if (result && result.success) {
+                            let confirmationMessage;
+
+                            switch (confirmationResult.action) {
+                                case 'cancel':
+                                    confirmationMessage = `I've cancelled your reminder to ${confirmationResult.data.task}.`;
+                                    break;
+                                case 'reschedule':
+                                    confirmationMessage = `I've rescheduled your reminder to ${confirmationResult.data.task} for ${confirmationResult.data.time}.`;
+                                    break;
+                                default:
+                                    confirmationMessage = "I've processed your request successfully.";
+                            }
+
+                            // Send the confirmation as a system message to OpenAI
+                            sendSystemMessage(openAiWs, confirmationMessage);
+                        } else {
+                            sendSystemMessage(openAiWs, "I wasn't able to process that action. Could you try asking me again?");
+                        }
+
+                        state.awaitingConfirmation = false;
+                    } else if (confirmationResult.action === 'rejected') {
+                        // User rejected the action
+                        sendSystemMessage(openAiWs, "No problem, I won't make that change.");
+                        state.awaitingConfirmation = false;
+                    } else if (confirmationResult.needsMoreClarification) {
+                        // Need more clarification
+                        sendSystemMessage(openAiWs, "I'm not sure if you want to proceed. Please say yes or no.");
+                        state.awaitingConfirmation = true;
+                    }
+                }
+            } else {
+                state.awaitingConfirmation = false;
+            }
+        }
+    };
+
     // Setup OpenAI WebSocket event handlers
     openAiWs.on('message', (data) => {
         try {
@@ -92,7 +170,9 @@ export function setupMediaStreamHandler(connection, req) {
                 state.currentAssistantResponse = response.transcript;
 
                 // Process the complete response for reminder extraction
-                processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber);
+                if (!state.awaitingConfirmation) {
+                    processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber);
+                }
             }
 
             // Handle OpenAI's transcription events
@@ -107,6 +187,10 @@ export function setupMediaStreamHandler(connection, req) {
             if (response.type === 'conversation.item.input_audio_transcription.completed') {
                 if (response.transcript) {
                     logger.userMessage(response.transcript);
+
+                    // Process the user's input for confirmations
+                    processUserInput(response.transcript);
+
                     state.currentUserTranscript = '';
                 }
             }
@@ -161,6 +245,32 @@ export function setupMediaStreamHandler(connection, req) {
                             .then(() => {
                                 state.sessionInitialized = true;
                                 sendInitialConversation(openAiWs);
+
+                                // Check if user has pending confirmations
+                                if (state.callerPhoneNumber) {
+                                    const pendingConfirmation = getPendingConfirmation(state.callerPhoneNumber);
+                                    if (pendingConfirmation) {
+                                        state.awaitingConfirmation = true;
+
+                                        // Remind the user about the pending confirmation
+                                        let reminderMessage;
+                                        switch (pendingConfirmation.action) {
+                                            case 'cancel':
+                                                reminderMessage = `You were in the process of canceling your reminder to ${pendingConfirmation.data.task}. Would you like to continue with cancellation?`;
+                                                break;
+                                            case 'reschedule':
+                                                reminderMessage = `You were in the process of rescheduling your reminder to ${pendingConfirmation.data.task}. Would you like to continue with rescheduling?`;
+                                                break;
+                                            default:
+                                                reminderMessage = "You have a pending action to confirm. Would you like to proceed with it?";
+                                        }
+
+                                        // Send reminder as system message after a short delay
+                                        setTimeout(() => {
+                                            sendSystemMessage(openAiWs, reminderMessage);
+                                        }, 3000);
+                                    }
+                                }
                             })
                             .catch(err => logger.error('Failed to initialize session:', err));
                     }

@@ -221,3 +221,29 @@ export function sendAudioBuffer(openAiWs, audioData) {
 
     openAiWs.send(JSON.stringify(audioAppend));
 }
+
+/**
+ * Send a system message to OpenAI
+ * @param {WebSocket} openAiWs OpenAI WebSocket
+ * @param {string} message The system message text
+ */
+export function sendSystemMessage(openAiWs, message) {
+    if (openAiWs.readyState !== WebSocket.OPEN) return;
+
+    const systemMessage = {
+        type: 'conversation.item.create',
+        item: {
+            type: 'message',
+            role: 'system',
+            content: [
+                {
+                    type: 'text',
+                    text: message
+                }
+            ]
+        }
+    };
+
+    logger.info(`Sending system message: ${message}`);
+    openAiWs.send(JSON.stringify(systemMessage));
+}
