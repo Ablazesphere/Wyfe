@@ -127,6 +127,8 @@ export function sendTimeUpdate(openAiWs) {
     if (openAiWs.readyState !== WebSocket.OPEN) return;
 
     const now = new Date();
+
+    // Get current time in IST
     const options = {
         timeZone: 'Asia/Kolkata',
         hour: 'numeric',
@@ -137,7 +139,11 @@ export function sendTimeUpdate(openAiWs) {
     const currentISTTime = now.toLocaleString('en-IN', options);
     const isoTimeUTC = now.toISOString();
 
-    // Send time update as a system message
+    // Add information about which hours have already passed today
+    const currentHour = now.getHours();
+    const passedHoursInfo = generatePassedHoursInfo(currentHour);
+
+    // Send time update as a system message with detailed information
     const timeUpdate = {
         type: 'conversation.item.create',
         item: {
@@ -146,14 +152,30 @@ export function sendTimeUpdate(openAiWs) {
             content: [
                 {
                     type: 'text',
-                    text: `Current time update: ${currentISTTime} (${isoTimeUTC})`
+                    text: `Current time update: ${currentISTTime} (${isoTimeUTC})
+${passedHoursInfo}
+IMPORTANT: If a user requests a reminder for a time that has already passed today, explicitly tell them you're setting it for tomorrow instead of today.`
                 }
             ]
         }
     };
 
-    logger.debug(`Time update sent: ${currentISTTime}`);
+    logger.debug(`Time update sent: ${currentISTTime} with passed hours info`);
     openAiWs.send(JSON.stringify(timeUpdate));
+}
+
+// Helper function to generate information about which hours have passed
+function generatePassedHoursInfo(currentHour) {
+    let passedHoursText = "Hours that have already passed today: ";
+    let hourStrings = [];
+
+    for (let i = 0; i <= currentHour; i++) {
+        const hour12 = i % 12 || 12;
+        const ampm = i < 12 ? 'AM' : 'PM';
+        hourStrings.push(`${hour12}:00 ${ampm}`);
+    }
+
+    return passedHoursText + hourStrings.join(', ');
 }
 
 /**

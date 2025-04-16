@@ -1,8 +1,9 @@
-// services/reminderService.js - Reminder creation and execution logic
+// services/reminderService.js - Reminder creation and execution logic with improved time handling
 import { logger } from '../utils/logger.js';
-import { parseTimeAndDate, parseNumericTime } from '../utils/dateUtils.js';
-import { createReminder, getReminder, updateReminderStatus, removeReminder } from '../models/reminderModel.js';
+import { parseTimeAndDate, parseNumericTime, formatFriendlyTime } from '../utils/dateUtils.js';
+import { createReminder, getReminder, updateReminderStatus, removeReminder, getAllReminders } from '../models/reminderModel.js';
 import { config } from '../config/config.js';
+import { sendSystemMessage } from './openaiService.js';
 
 /**
  * Extract reminder data from text transcript with a more flexible regex
@@ -127,22 +128,27 @@ export function extractReminderFromText(text) {
  * @param {string|number} time Time string (HH:MM) or minutes from now
  * @param {string} date Date string (dd/mm/yyyy) or null if using minutes
  * @param {string} phoneNumber User's phone number
- * @returns {Object} The created reminder
+ * @param {WebSocket} openAiWs Optional WebSocket to send time info to assistant
+ * @returns {Object} The created reminder and time status information
  */
-export function scheduleReminder(task, time, date, phoneNumber) {
+export function scheduleReminder(task, time, date, phoneNumber, openAiWs = null) {
     let triggerTime;
+    let timeHasPassed = false;
     const now = new Date();
 
     logger.debug(`Scheduling reminder with input time: ${time}, date: ${date} (time type: ${typeof time})`);
 
     // Handle time in "HH:MM" format with date in "dd/mm/yyyy" format
     if (typeof time === 'string' && typeof date === 'string') {
-        triggerTime = parseTimeAndDate(time, date);
+        const parseResult = parseTimeAndDate(time, date);
 
-        if (!triggerTime) {
+        if (!parseResult.date) {
             // Fallback to default time if parsing failed
             triggerTime = new Date(now.getTime() + config.REMINDER_DEFAULT_MINUTES * 60000);
             logger.warn(`Falling back to ${config.REMINDER_DEFAULT_MINUTES} minutes from now: ${triggerTime.toISOString()}`);
+        } else {
+            triggerTime = parseResult.date;
+            timeHasPassed = parseResult.timeHasPassed;
         }
     } else if (typeof time === 'number' || (!isNaN(parseInt(time)) && typeof time === 'string')) {
         // If time is a number or numeric string, treat it as minutes from now
@@ -162,9 +168,18 @@ export function scheduleReminder(task, time, date, phoneNumber) {
     // Double-check the time is not in the past (shouldn't happen with updated parseTimeAndDate)
     if (triggerTime < now) {
         logger.warn(`After parsing, time ${triggerTime.toISOString()} is still in the past. Moving to tomorrow.`);
-
         // Add 24 hours
         triggerTime = new Date(triggerTime.getTime() + 24 * 60 * 60 * 1000);
+        timeHasPassed = true;
+    }
+
+    // IMPORTANT: Communicate time status to the assistant if WebSocket is provided
+    if (openAiWs && timeHasPassed) {
+        const timeFormat = formatFriendlyTime(triggerTime);
+        const messageToAssistant = `IMPORTANT: The requested time (${time}) has already passed for today. The reminder is being set for TOMORROW at ${timeFormat} instead. You MUST tell the user it's for TOMORROW, not today.`;
+
+        sendSystemMessage(openAiWs, messageToAssistant);
+        logger.info("Sent time adjustment message to assistant: " + messageToAssistant);
     }
 
     // Create the reminder
@@ -180,7 +195,10 @@ export function scheduleReminder(task, time, date, phoneNumber) {
         executeReminder(reminder.id);
     }
 
-    return reminder;
+    return {
+        reminder: reminder,
+        timeHasPassed: timeHasPassed
+    };
 }
 
 /**
@@ -214,9 +232,10 @@ export function executeReminder(reminderId) {
  * Process assistant's response for reminders
  * @param {string} transcript The assistant's response text
  * @param {string} phoneNumber User's phone number
+ * @param {WebSocket} openAiWs Optional WebSocket for time communication
  * @returns {Object|null} Result of the reminder operation or null
  */
-export function processAssistantResponseForReminders(transcript, phoneNumber) {
+export function processAssistantResponseForReminders(transcript, phoneNumber, openAiWs = null) {
     // Extract reminder data from the transcript
     const reminderData = extractReminderFromText(transcript);
 
@@ -227,7 +246,7 @@ export function processAssistantResponseForReminders(transcript, phoneNumber) {
     // Handle different reminder actions
     switch (reminderData.action) {
         case 'create':
-            return handleCreateReminder(reminderData, phoneNumber);
+            return handleCreateReminder(reminderData, phoneNumber, openAiWs);
 
         case 'list':
             return handleListReminders(phoneNumber);
@@ -236,7 +255,7 @@ export function processAssistantResponseForReminders(transcript, phoneNumber) {
             return handleCancelReminder(reminderData, phoneNumber);
 
         case 'reschedule':
-            return handleRescheduleReminder(reminderData, phoneNumber);
+            return handleRescheduleReminder(reminderData, phoneNumber, openAiWs);
 
         default:
             logger.warn(`Unknown reminder action: ${reminderData.action}`);
@@ -248,24 +267,34 @@ export function processAssistantResponseForReminders(transcript, phoneNumber) {
  * Handle the creation of a new reminder
  * @param {Object} reminderData The extracted reminder data
  * @param {string} phoneNumber User's phone number
+ * @param {WebSocket} openAiWs Optional WebSocket for time communication
  * @returns {Object} The created reminder
  */
-function handleCreateReminder(reminderData, phoneNumber) {
+function handleCreateReminder(reminderData, phoneNumber, openAiWs = null) {
     if (!reminderData.task || !reminderData.time) {
         logger.warn('Missing required fields for creating reminder');
         return null;
     }
 
-    // Schedule the reminder
-    const reminder = scheduleReminder(
+    // Schedule the reminder, passing the WebSocket for time communication
+    const result = scheduleReminder(
         reminderData.task,
         reminderData.time,
         reminderData.date,
-        phoneNumber || 'unknown'
+        phoneNumber || 'unknown',
+        openAiWs
     );
 
+    const reminder = result.reminder;
+    const timeHasPassed = result.timeHasPassed;
+
     logger.info('Reminder created:', reminder);
-    return { action: 'create', success: true, reminder };
+    return {
+        action: 'create',
+        success: true,
+        reminder,
+        timeHasPassed
+    };
 }
 
 /**
@@ -274,9 +303,6 @@ function handleCreateReminder(reminderData, phoneNumber) {
  * @returns {Object} Result with list of reminders
  */
 function handleListReminders(phoneNumber) {
-    // Import the getAllReminders function if needed
-    // const { getAllReminders } = require('../models/reminderModel.js');
-
     const reminders = getAllReminders(phoneNumber);
     logger.info(`Retrieved ${reminders.length} reminders for ${phoneNumber}`);
 
@@ -333,9 +359,10 @@ function handleCancelReminder(reminderData, phoneNumber) {
  * Handle rescheduling a reminder
  * @param {Object} reminderData The extracted reminder data
  * @param {string} phoneNumber User's phone number
+ * @param {WebSocket} openAiWs Optional WebSocket for time communication
  * @returns {Object} Result of the rescheduling
  */
-function handleRescheduleReminder(reminderData, phoneNumber) {
+function handleRescheduleReminder(reminderData, phoneNumber, openAiWs = null) {
     if (!reminderData.task || !reminderData.time || !reminderData.date) {
         logger.warn('Missing required fields for rescheduling reminder');
         return null;
@@ -352,7 +379,7 @@ function handleRescheduleReminder(reminderData, phoneNumber) {
 
         // Instead of failing, create a new reminder
         logger.info(`Creating new reminder instead of rescheduling`);
-        return handleCreateReminder(reminderData, phoneNumber);
+        return handleCreateReminder(reminderData, phoneNumber, openAiWs);
     }
 
     if (matchingReminders.length > 1) {
@@ -368,18 +395,23 @@ function handleRescheduleReminder(reminderData, phoneNumber) {
     removeReminder(reminderToReschedule.id);
 
     // Create a new reminder with the updated time
-    const newReminder = scheduleReminder(
+    const result = scheduleReminder(
         reminderToReschedule.task, // Keep the original task
         reminderData.time,         // Use the new time
         reminderData.date,         // Use the new date
-        phoneNumber                // Keep the same phone number
+        phoneNumber,               // Keep the same phone number
+        openAiWs                   // Pass the WebSocket for time communication
     );
+
+    const newReminder = result.reminder;
+    const timeHasPassed = result.timeHasPassed;
 
     logger.info(`Reminder rescheduled: ${reminderToReschedule.id} -> ${newReminder.id}`);
     return {
         action: 'reschedule',
         success: true,
         oldReminder: reminderToReschedule.toJSON(),
-        newReminder: newReminder.toJSON()
+        newReminder: newReminder.toJSON(),
+        timeHasPassed: timeHasPassed
     };
 }

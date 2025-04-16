@@ -1,4 +1,4 @@
-// Updated twilioService.js with confirmation flow integration
+// services/twilioService.js - Updated for time handling consistency
 import { logger } from '../utils/logger.js';
 import {
     getOpenAiConnection,
@@ -10,7 +10,10 @@ import {
     returnConnectionToPool,
     sendSystemMessage
 } from './openaiService.js';
-import { processAssistantResponseForReminders } from './reminderService.js';
+import {
+    processAssistantResponseForReminders,
+    extractReminderFromText
+} from './reminderService.js';
 import {
     getPendingConfirmation,
     processConfirmationResponse
@@ -96,7 +99,7 @@ export function setupMediaStreamHandler(connection, req) {
     };
 
     /**
-     * Process user's transcribed input for confirmations
+     * Process user's transcribed input for confirmations and reminders
      * @param {string} transcript User's transcribed input
      */
     const processUserInput = (transcript) => {
@@ -118,7 +121,8 @@ export function setupMediaStreamHandler(connection, req) {
                                 time: confirmationResult.data.time,
                                 date: confirmationResult.data.date
                             }),
-                            state.callerPhoneNumber
+                            state.callerPhoneNumber,
+                            openAiWs  // Pass the OpenAI WebSocket for time communication
                         );
 
                         // Provide feedback to the user via system message
@@ -130,7 +134,12 @@ export function setupMediaStreamHandler(connection, req) {
                                     confirmationMessage = `I've cancelled your reminder to ${confirmationResult.data.task}.`;
                                     break;
                                 case 'reschedule':
-                                    confirmationMessage = `I've rescheduled your reminder to ${confirmationResult.data.task} for ${confirmationResult.data.time}.`;
+                                    // Include time adjustment information if relevant
+                                    if (result.timeHasPassed) {
+                                        confirmationMessage = `I've rescheduled your reminder to ${confirmationResult.data.task} for ${confirmationResult.data.time} tomorrow.`;
+                                    } else {
+                                        confirmationMessage = `I've rescheduled your reminder to ${confirmationResult.data.task} for ${confirmationResult.data.time} today.`;
+                                    }
                                     break;
                                 default:
                                     confirmationMessage = "I've processed your request successfully.";
@@ -171,7 +180,19 @@ export function setupMediaStreamHandler(connection, req) {
 
                 // Process the complete response for reminder extraction
                 if (!state.awaitingConfirmation) {
-                    processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber);
+                    // Check if response contains reminder data that needs time handling
+                    const reminderData = extractReminderFromText(response.transcript);
+
+                    if (reminderData &&
+                        (reminderData.action === 'create' || reminderData.action === 'reschedule') &&
+                        reminderData.time && reminderData.date) {
+
+                        // Pass openAiWs to ensure time status is communicated
+                        processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
+                    } else {
+                        // Regular processing without WebSocket
+                        processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber);
+                    }
                 }
             }
 
