@@ -49,6 +49,7 @@ export function formatFriendlyTime(date) {
 
 /**
  * Parse time (HH:MM) and date (dd/mm/yyyy) strings into a Date object
+ * Automatically moves to next day if time is in the past
  * @param {string} timeStr Time string in HH:MM format
  * @param {string} dateStr Date string in dd/mm/yyyy format
  * @returns {Date|null} Date object or null if parsing failed
@@ -67,6 +68,19 @@ export function parseTimeAndDate(timeStr, dateStr) {
         // Validate the date object
         if (isNaN(date.getTime())) {
             throw new Error("Invalid date after parsing");
+        }
+
+        // Check if the time is in the past (for today)
+        const now = new Date();
+
+        // If date is today and time is in the past, move to tomorrow
+        if (date.getFullYear() === now.getFullYear() &&
+            date.getMonth() === now.getMonth() &&
+            date.getDate() === now.getDate() &&
+            date < now) {
+
+            logger.info(`Time ${timeStr} is in the past. Moving reminder to tomorrow.`);
+            date.setDate(date.getDate() + 1);
         }
 
         return date;

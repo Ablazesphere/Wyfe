@@ -159,6 +159,14 @@ export function scheduleReminder(task, time, date, phoneNumber) {
         triggerTime = new Date(now.getTime() + config.REMINDER_DEFAULT_MINUTES * 60000);
     }
 
+    // Double-check the time is not in the past (shouldn't happen with updated parseTimeAndDate)
+    if (triggerTime < now) {
+        logger.warn(`After parsing, time ${triggerTime.toISOString()} is still in the past. Moving to tomorrow.`);
+
+        // Add 24 hours
+        triggerTime = new Date(triggerTime.getTime() + 24 * 60 * 60 * 1000);
+    }
+
     // Create the reminder
     const reminder = createReminder(task, triggerTime, phoneNumber);
 
