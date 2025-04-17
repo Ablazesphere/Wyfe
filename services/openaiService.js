@@ -84,6 +84,10 @@ export function returnConnectionToPool(connection) {
  */
 export function initializeSession(openAiWs) {
     return new Promise((resolve, reject) => {
+        // Include current time information directly in the initial system message
+        // This avoids the need for separate time updates that might interrupt the conversation
+        const systemInstructions = getSystemMessageWithTime();
+
         const sessionUpdate = {
             type: 'session.update',
             session: {
@@ -91,7 +95,7 @@ export function initializeSession(openAiWs) {
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
                 voice: config.OPENAI_VOICE,
-                instructions: getSystemMessageWithTime(),
+                instructions: systemInstructions,
                 modalities: ["text", "audio"],
                 temperature: 0.7,
                 input_audio_transcription: {
@@ -120,62 +124,47 @@ export function initializeSession(openAiWs) {
 }
 
 /**
- * Send time update as system message
+ * IMPORTANT: This function has been refactored to work more safely
+ * It now only sends time updates when there's no active response or user speech
  * @param {WebSocket} openAiWs OpenAI WebSocket
+ * @param {Object} state Connection state object
+ * @returns {boolean} Whether the update was sent
  */
-export function sendTimeUpdate(openAiWs) {
-    if (openAiWs.readyState !== WebSocket.OPEN) return;
+export function sendTimeUpdate(openAiWs, state) {
+    // Don't send updates if the connection isn't open
+    if (openAiWs.readyState !== WebSocket.OPEN) return false;
 
-    const now = new Date();
+    // Don't send updates if the assistant is actively responding or the user is speaking
+    if (state.responseStartTimestampTwilio !== null ||
+        state.currentUserTranscript !== '' ||
+        state.markQueue.length > 0 ||
+        state.awaitingConfirmation) {
+        logger.debug('Skipping time update - conversation is active');
+        return false;
+    }
 
     // Get current time in IST
+    const now = new Date();
     const options = {
         timeZone: 'Asia/Kolkata',
         hour: 'numeric',
         minute: 'numeric',
-        second: 'numeric',
         hour12: true
     };
     const currentISTTime = now.toLocaleString('en-IN', options);
-    const isoTimeUTC = now.toISOString();
 
-    // Add information about which hours have already passed today
-    const currentHour = now.getHours();
-    const passedHoursInfo = generatePassedHoursInfo(currentHour);
-
-    // Send time update as a system message with detailed information
+    // Instead of generating a complex message with passed hours,
+    // just send a simple time update
     const timeUpdate = {
-        type: 'conversation.item.create',
-        item: {
-            type: 'message',
-            role: 'system',
-            content: [
-                {
-                    type: 'text',
-                    text: `Current time update: ${currentISTTime} (${isoTimeUTC})
-${passedHoursInfo}
-IMPORTANT: If a user requests a reminder for a time that has already passed today, explicitly tell them you're setting it for tomorrow instead of today.`
-                }
-            ]
+        type: 'session.update',
+        session: {
+            instructions: getSystemMessageWithTime()
         }
     };
 
-    logger.debug(`Time update sent: ${currentISTTime} with passed hours info`);
+    logger.debug(`Time update sent: ${currentISTTime}`);
     openAiWs.send(JSON.stringify(timeUpdate));
-}
-
-// Helper function to generate information about which hours have passed
-function generatePassedHoursInfo(currentHour) {
-    let passedHoursText = "Hours that have already passed today: ";
-    let hourStrings = [];
-
-    for (let i = 0; i <= currentHour; i++) {
-        const hour12 = i % 12 || 12;
-        const ampm = i < 12 ? 'AM' : 'PM';
-        hourStrings.push(`${hour12}:00 ${ampm}`);
-    }
-
-    return passedHoursText + hourStrings.join(', ');
+    return true;
 }
 
 /**
@@ -246,23 +235,19 @@ export function sendAudioBuffer(openAiWs, audioData) {
 
 /**
  * Send a system message to OpenAI
+ * This is now safer for use during ongoing conversations
  * @param {WebSocket} openAiWs OpenAI WebSocket
  * @param {string} message The system message text
  */
 export function sendSystemMessage(openAiWs, message) {
     if (openAiWs.readyState !== WebSocket.OPEN) return;
 
+    // Use a safer approach - append to the session instructions
+    // This is less likely to break the conversation flow
     const systemMessage = {
-        type: 'conversation.item.create',
-        item: {
-            type: 'message',
-            role: 'system',
-            content: [
-                {
-                    type: 'text',
-                    text: message
-                }
-            ]
+        type: 'session.update',
+        session: {
+            additional_instructions: message
         }
     };
 

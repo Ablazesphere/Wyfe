@@ -1,4 +1,4 @@
-// services/twilioService.js - Updated for time handling consistency
+// services/twilioService.js - Updated with fixed time update handling
 import { logger } from '../utils/logger.js';
 import {
     getOpenAiConnection,
@@ -40,7 +40,8 @@ export function setupMediaStreamHandler(connection, req) {
         callerPhoneNumber: null,
         currentAssistantResponse: '',
         timeUpdateInterval: null,
-        awaitingConfirmation: false
+        awaitingConfirmation: false,
+        lastTimeUpdate: Date.now()
     };
 
     // Extract caller phone number from Twilio if available
@@ -52,12 +53,20 @@ export function setupMediaStreamHandler(connection, req) {
     // Get OpenAI connection
     const openAiWs = getOpenAiConnection();
 
-    // Setup time updates
+    // Setup time updates - now passing the state object to sendTimeUpdate
+    // and using a longer interval (5 minutes instead of 1 minute)
     state.timeUpdateInterval = setInterval(() => {
         if (state.sessionInitialized) {
-            sendTimeUpdate(openAiWs);
+            // Only update if enough time has passed (at least 5 minutes)
+            const now = Date.now();
+            if (now - state.lastTimeUpdate >= 5 * 60 * 1000) {
+                // Only update the lastTimeUpdate if sendTimeUpdate actually sent an update
+                if (sendTimeUpdate(openAiWs, state)) {
+                    state.lastTimeUpdate = now;
+                }
+            }
         }
-    }, 60000); // Every minute
+    }, 60 * 1000); // Check every 1 minute
 
     /**
      * Handle interruption when the caller's speech starts
@@ -302,6 +311,7 @@ export function setupMediaStreamHandler(connection, req) {
                     state.currentUserTranscript = '';
                     state.lastTranscriptId = null;
                     state.currentAssistantResponse = '';
+                    state.lastTimeUpdate = Date.now();
                     break;
 
                 case 'mark':
