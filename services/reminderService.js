@@ -1,9 +1,10 @@
-// services/reminderService.js - Reminder creation and execution logic with improved time handling
+// services/reminderService.js - Enhanced time parsing and edge case handling
 import { logger } from '../utils/logger.js';
-import { parseTimeAndDate, parseNumericTime, formatFriendlyTime } from '../utils/dateUtils.js';
-import { createReminder, getReminder, updateReminderStatus, removeReminder, getAllReminders } from '../models/reminderModel.js';
+import { parseTimeAndDate, parseNumericTime, formatFriendlyTime, parseNaturalLanguageTime } from '../utils/dateUtils.js';
+import { createReminder, getReminder, updateReminderStatus, removeReminder, getAllReminders, findRemindersByTask } from '../models/reminderModel.js';
 import { config } from '../config/config.js';
 import { sendSystemMessage } from './openaiService.js';
+import { createConfirmation } from '../utils/confirmationHandler.js';
 
 /**
  * Extract reminder data from text transcript with a more flexible regex
@@ -134,18 +135,43 @@ export function extractReminderFromText(text) {
 export function scheduleReminder(task, time, date, phoneNumber, openAiWs = null) {
     let triggerTime;
     let timeHasPassed = false;
+    let isRelativeTime = false;
     const now = new Date();
 
     logger.debug(`Scheduling reminder with input time: ${time}, date: ${date} (time type: ${typeof time})`);
 
-    // Handle time in "HH:MM" format with date in "dd/mm/yyyy" format
-    if (typeof time === 'string' && typeof date === 'string') {
+    // First, check if it's a natural language time expression
+    if (typeof time === 'string' && time.toLowerCase().includes('tomorrow')) {
+        // Handle "tomorrow" specifically
+        const parsedTime = parseNaturalLanguageTime(time);
+        if (parsedTime && parsedTime.date) {
+            triggerTime = parsedTime.date;
+            isRelativeTime = true;
+            // No need to check if time has passed, since it's tomorrow
+        }
+    } else if (typeof time === 'string' && (
+        time.toLowerCase().includes('minute') ||
+        time.toLowerCase().includes('hour') ||
+        time.toLowerCase().includes('min') ||
+        time.toLowerCase().includes('am') ||
+        time.toLowerCase().includes('pm')
+    )) {
+        // Handle other natural language expressions
+        const parsedTime = parseNaturalLanguageTime(time);
+        if (parsedTime && parsedTime.date) {
+            triggerTime = parsedTime.date;
+            timeHasPassed = parsedTime.timeHasPassed;
+            isRelativeTime = parsedTime.isRelative;
+        }
+    } else if (typeof time === 'string' && typeof date === 'string') {
+        // Handle time in "HH:MM" format with date in "dd/mm/yyyy" format
         const parseResult = parseTimeAndDate(time, date);
 
         if (!parseResult.date) {
             // Fallback to default time if parsing failed
             triggerTime = new Date(now.getTime() + config.REMINDER_DEFAULT_MINUTES * 60000);
             logger.warn(`Falling back to ${config.REMINDER_DEFAULT_MINUTES} minutes from now: ${triggerTime.toISOString()}`);
+            isRelativeTime = true;
         } else {
             triggerTime = parseResult.date;
             timeHasPassed = parseResult.timeHasPassed;
@@ -153,16 +179,19 @@ export function scheduleReminder(task, time, date, phoneNumber, openAiWs = null)
     } else if (typeof time === 'number' || (!isNaN(parseInt(time)) && typeof time === 'string')) {
         // If time is a number or numeric string, treat it as minutes from now
         triggerTime = parseNumericTime(time);
+        isRelativeTime = true;
 
         if (!triggerTime) {
             // Fallback to default time if parsing failed
             triggerTime = new Date(now.getTime() + config.REMINDER_DEFAULT_MINUTES * 60000);
             logger.warn(`Falling back to ${config.REMINDER_DEFAULT_MINUTES} minutes from now: ${triggerTime.toISOString()}`);
+            isRelativeTime = true;
         }
     } else {
         // Default to 5 minutes from now for any other format
         logger.warn(`Couldn't parse time format: ${time}, ${date}, defaulting to ${config.REMINDER_DEFAULT_MINUTES} minutes`);
         triggerTime = new Date(now.getTime() + config.REMINDER_DEFAULT_MINUTES * 60000);
+        isRelativeTime = true;
     }
 
     // Double-check the time is not in the past (shouldn't happen with updated parseTimeAndDate)
@@ -197,7 +226,8 @@ export function scheduleReminder(task, time, date, phoneNumber, openAiWs = null)
 
     return {
         reminder: reminder,
-        timeHasPassed: timeHasPassed
+        timeHasPassed: timeHasPassed,
+        isRelativeTime: isRelativeTime
     };
 }
 
@@ -252,7 +282,7 @@ export function processAssistantResponseForReminders(transcript, phoneNumber, op
             return handleListReminders(phoneNumber);
 
         case 'cancel':
-            return handleCancelReminder(reminderData, phoneNumber);
+            return handleCancelReminder(reminderData, phoneNumber, openAiWs);
 
         case 'reschedule':
             return handleRescheduleReminder(reminderData, phoneNumber, openAiWs);
@@ -287,13 +317,15 @@ function handleCreateReminder(reminderData, phoneNumber, openAiWs = null) {
 
     const reminder = result.reminder;
     const timeHasPassed = result.timeHasPassed;
+    const isRelativeTime = result.isRelativeTime;
 
     logger.info('Reminder created:', reminder);
     return {
         action: 'create',
         success: true,
         reminder,
-        timeHasPassed
+        timeHasPassed,
+        isRelativeTime
     };
 }
 
@@ -303,47 +335,124 @@ function handleCreateReminder(reminderData, phoneNumber, openAiWs = null) {
  * @returns {Object} Result with list of reminders
  */
 function handleListReminders(phoneNumber) {
-    const reminders = getAllReminders(phoneNumber);
-    logger.info(`Retrieved ${reminders.length} reminders for ${phoneNumber}`);
+    // Get all reminders regardless of phone number for testing purposes
+    // In production, you'd want to filter by phoneNumber
+    const reminders = getAllReminders();
+    logger.info(`Retrieved ${reminders.length} reminders in total`);
+
+    // Group reminders by status and filter to only pending ones
+    const pendingReminders = reminders.filter(r => r.status === 'pending');
+
+    // Sort reminders by trigger time (earliest first)
+    pendingReminders.sort((a, b) => a.triggerTime - b.triggerTime);
+
+    // Format each reminder with friendly time/date
+    const formattedReminders = pendingReminders.map(r => ({
+        id: r.id,
+        task: r.task,
+        triggerTime: r.triggerTime.toISOString(),
+        friendlyTime: formatFriendlyTime(r.triggerTime),
+        friendlyDate: formatFriendlyDate(r.triggerTime),
+        phoneNumber: r.phoneNumber
+    }));
+
+    // Generate a display message
+    let displayMessage;
+    if (pendingReminders.length === 0) {
+        displayMessage = "You don't have any pending reminders.";
+    } else {
+        const reminderStrings = formattedReminders.map(r =>
+            `${r.task} at ${r.friendlyTime} on ${r.friendlyDate}`
+        ).join(', and ');
+
+        displayMessage = `Here are your pending reminders: ${reminderStrings}.`;
+    }
 
     return {
         action: 'list',
         success: true,
-        reminders: reminders.map(r => r.toJSON()),
-        count: reminders.length
+        reminders: formattedReminders,
+        count: pendingReminders.length,
+        displayMessage: displayMessage  // This will be read aloud
     };
 }
 
 /**
- * Handle canceling a reminder
+ * Handle canceling a reminder with improved disambiguation
  * @param {Object} reminderData The extracted reminder data
  * @param {string} phoneNumber User's phone number
+ * @param {WebSocket} openAiWs Optional WebSocket for system messages
  * @returns {Object} Result of the cancellation
  */
-function handleCancelReminder(reminderData, phoneNumber) {
+function handleCancelReminder(reminderData, phoneNumber, openAiWs = null) {
     if (!reminderData.task) {
         logger.warn('Missing task for canceling reminder');
         return null;
     }
 
     // Find reminders matching the task description for this user
-    const userReminders = getAllReminders(phoneNumber);
-    const matchingReminders = userReminders.filter(r =>
-        r.task.toLowerCase().includes(reminderData.task.toLowerCase())
-    );
+    const matchingReminders = findRemindersByTask(reminderData.task, phoneNumber);
 
     if (matchingReminders.length === 0) {
         logger.info(`No matching reminders found for "${reminderData.task}" and phone ${phoneNumber}`);
-        return { action: 'cancel', success: false, reason: 'no_match', originalTask: reminderData.task };
+
+        if (openAiWs) {
+            sendSystemMessage(openAiWs, `I couldn't find any reminders that match "${reminderData.task}". Please check if the reminder exists or try with a different description.`);
+        }
+
+        return {
+            action: 'cancel',
+            success: false,
+            reason: 'no_match',
+            originalTask: reminderData.task
+        };
     }
 
     if (matchingReminders.length > 1) {
-        logger.info(`Multiple matching reminders found for "${reminderData.task}". Using the first one.`);
-        // We could return a disambiguation result here, but for now we'll use the first match
+        logger.info(`Multiple (${matchingReminders.length}) matching reminders found for "${reminderData.task}".`);
+
+        // Create a confirmation flow for disambiguation
+        if (openAiWs) {
+            const reminderOptions = matchingReminders.map((r, i) =>
+                `${i + 1}. "${r.task}" at ${formatFriendlyTime(r.triggerTime)}`
+            ).join('\n');
+
+            sendSystemMessage(openAiWs, `I found multiple reminders that match "${reminderData.task}":\n${reminderOptions}\n\nPlease specify which one you'd like to cancel by mentioning the specific reminder or its number.`);
+
+            // Store the matching reminders for later use
+            // We're not creating a confirmation yet, just informing the user
+            return {
+                action: 'disambiguation',
+                success: false,
+                matchingReminders: matchingReminders.map(r => r.toJSON()),
+                count: matchingReminders.length,
+                reason: 'multiple_matches'
+            };
+        }
     }
 
-    // Cancel the first matching reminder
+    // If we have exactly one match or we're proceeding without disambiguation
     const reminderToCancel = matchingReminders[0];
+
+    // For a single match, create a confirmation request
+    if (openAiWs && phoneNumber) {
+        createConfirmation(phoneNumber, 'cancel', {
+            task: reminderToCancel.task,
+            reminderId: reminderToCancel.id,
+            time: formatFriendlyTime(reminderToCancel.triggerTime)
+        });
+
+        sendSystemMessage(openAiWs, `Just to confirm, you want to cancel your reminder "${reminderToCancel.task}" scheduled for ${formatFriendlyTime(reminderToCancel.triggerTime)}. Is that correct?`);
+
+        return {
+            action: 'cancel',
+            success: false,
+            reminder: reminderToCancel.toJSON(),
+            pendingConfirmation: true
+        };
+    }
+
+    // If we don't have a way to confirm, proceed with cancellation
     updateReminderStatus(reminderToCancel.id, 'cancelled');
     const removed = removeReminder(reminderToCancel.id);
 
@@ -356,7 +465,7 @@ function handleCancelReminder(reminderData, phoneNumber) {
 }
 
 /**
- * Handle rescheduling a reminder
+ * Handle rescheduling a reminder with improved disambiguation
  * @param {Object} reminderData The extracted reminder data
  * @param {string} phoneNumber User's phone number
  * @param {WebSocket} openAiWs Optional WebSocket for time communication
@@ -369,13 +478,14 @@ function handleRescheduleReminder(reminderData, phoneNumber, openAiWs = null) {
     }
 
     // Find reminders matching the task description for this user
-    const userReminders = getAllReminders(phoneNumber);
-    const matchingReminders = userReminders.filter(r =>
-        r.task.toLowerCase().includes(reminderData.task.toLowerCase())
-    );
+    const matchingReminders = findRemindersByTask(reminderData.task, phoneNumber);
 
     if (matchingReminders.length === 0) {
         logger.info(`No matching reminders found for "${reminderData.task}" and phone ${phoneNumber}`);
+
+        if (openAiWs) {
+            sendSystemMessage(openAiWs, `I couldn't find any reminders that match "${reminderData.task}". Would you like me to create a new reminder instead?`);
+        }
 
         // Instead of failing, create a new reminder
         logger.info(`Creating new reminder instead of rescheduling`);
@@ -383,12 +493,55 @@ function handleRescheduleReminder(reminderData, phoneNumber, openAiWs = null) {
     }
 
     if (matchingReminders.length > 1) {
-        logger.info(`Multiple matching reminders found for "${reminderData.task}". Using the first one.`);
-        // We could return a disambiguation result here, but for now we'll use the first match
+        logger.info(`Multiple (${matchingReminders.length}) matching reminders found for "${reminderData.task}".`);
+
+        // Create a confirmation flow for disambiguation
+        if (openAiWs) {
+            const reminderOptions = matchingReminders.map((r, i) =>
+                `${i + 1}. "${r.task}" at ${formatFriendlyTime(r.triggerTime)}`
+            ).join('\n');
+
+            sendSystemMessage(openAiWs, `I found multiple reminders that match "${reminderData.task}":\n${reminderOptions}\n\nPlease specify which one you'd like to reschedule by mentioning the specific reminder or its number.`);
+
+            return {
+                action: 'disambiguation',
+                success: false,
+                matchingReminders: matchingReminders.map(r => r.toJSON()),
+                count: matchingReminders.length,
+                reason: 'multiple_matches'
+            };
+        }
     }
 
     // Get the first matching reminder
     const reminderToReschedule = matchingReminders[0];
+
+    // For a single match, create a confirmation request
+    if (openAiWs && phoneNumber) {
+        // Parse the new time to provide clear information in the confirmation
+        const timeInfo = parseTimeAndDate(reminderData.time, reminderData.date);
+        const formattedNewTime = timeInfo.date ? formatFriendlyTime(timeInfo.date) : reminderData.time;
+        const dayAdjustment = timeInfo.timeHasPassed ? " tomorrow" : " today";
+
+        createConfirmation(phoneNumber, 'reschedule', {
+            task: reminderToReschedule.task,
+            reminderId: reminderToReschedule.id,
+            time: reminderData.time,
+            date: reminderData.date,
+            oldTime: formatFriendlyTime(reminderToReschedule.triggerTime)
+        });
+
+        sendSystemMessage(openAiWs, `Just to confirm, you want to reschedule your reminder "${reminderToReschedule.task}" from ${formatFriendlyTime(reminderToReschedule.triggerTime)} to ${formattedNewTime}${dayAdjustment}. Is that correct?`);
+
+        return {
+            action: 'reschedule',
+            success: false,
+            reminder: reminderToReschedule.toJSON(),
+            newTime: timeInfo.date ? timeInfo.date.toISOString() : null,
+            timeHasPassed: timeInfo.timeHasPassed,
+            pendingConfirmation: true
+        };
+    }
 
     // Cancel the old reminder
     updateReminderStatus(reminderToReschedule.id, 'rescheduled');
@@ -414,4 +567,83 @@ function handleRescheduleReminder(reminderData, phoneNumber, openAiWs = null) {
         newReminder: newReminder.toJSON(),
         timeHasPassed: timeHasPassed
     };
+}
+
+/**
+ * Process a disambiguation response to identify which reminder the user selected
+ * @param {string} transcript User's response transcript
+ * @param {Array} matchingReminders List of matching reminders
+ * @returns {Object|null} The selected reminder or null if no selection identified
+ */
+export function processDisambiguationResponse(transcript, matchingReminders) {
+    if (!transcript || !matchingReminders || matchingReminders.length === 0) {
+        return null;
+    }
+
+    const normalizedTranscript = transcript.toLowerCase();
+
+    // Check for numeric selection (e.g., "number 2" or "the second one")
+    const numberWords = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+    const numberRegex = /\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/;
+
+    let selectedIndex = -1;
+
+    // Check for explicit numbers (1, 2, 3, etc.)
+    const numericMatch = normalizedTranscript.match(/\b(\d+)\b/);
+    if (numericMatch) {
+        selectedIndex = parseInt(numericMatch[1]) - 1; // Convert to 0-based index
+    }
+
+    // Check for number words (first, second, etc.)
+    if (selectedIndex < 0) {
+        for (let i = 0; i < numberWords.length; i++) {
+            if (normalizedTranscript.includes(numberWords[i])) {
+                selectedIndex = i;
+                break;
+            }
+        }
+    }
+
+    // Check for number words as digits (one, two, etc.)
+    if (selectedIndex < 0) {
+        const wordMatch = normalizedTranscript.match(numberRegex);
+        if (wordMatch) {
+            const wordToNumber = {
+                'one': 0, 'two': 1, 'three': 2, 'four': 3, 'five': 4,
+                'six': 5, 'seven': 6, 'eight': 7, 'nine': 8, 'ten': 9
+            };
+
+            if (wordToNumber[wordMatch[1]] !== undefined) {
+                selectedIndex = wordToNumber[wordMatch[1]];
+            } else {
+                // Try to parse it as a number
+                selectedIndex = parseInt(wordMatch[1]) - 1;
+            }
+        }
+    }
+
+    // If we have a valid index, return that reminder
+    if (selectedIndex >= 0 && selectedIndex < matchingReminders.length) {
+        return matchingReminders[selectedIndex];
+    }
+
+    // If numeric selection failed, check for content match
+    // This handles cases like "cancel the meeting with John" when multiple reminders were presented
+    for (const reminder of matchingReminders) {
+        // Check if significant parts of the reminder task appear in the transcript
+        // This is a simple approach - more sophisticated NLP could be used
+        const taskWords = reminder.task.toLowerCase().split(/\s+/);
+        const significantWords = taskWords.filter(word => word.length > 3); // Filter out short words
+
+        const matchCount = significantWords.filter(word => normalizedTranscript.includes(word)).length;
+        const matchRatio = matchCount / significantWords.length;
+
+        // If a significant portion of the task words are in the transcript
+        if (matchRatio > 0.5 || (significantWords.length > 0 && matchCount >= 2)) {
+            return reminder;
+        }
+    }
+
+    // No clear selection found
+    return null;
 }

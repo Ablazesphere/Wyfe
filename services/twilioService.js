@@ -1,4 +1,4 @@
-// services/twilioService.js - Updated with fixed time update handling
+// services/twilioService.js - Enhanced with contextual understanding
 import { logger } from '../utils/logger.js';
 import {
     getOpenAiConnection,
@@ -12,12 +12,21 @@ import {
 } from './openaiService.js';
 import {
     processAssistantResponseForReminders,
-    extractReminderFromText
+    extractReminderFromText,
+    processDisambiguationResponse
 } from './reminderService.js';
 import {
     getPendingConfirmation,
-    processConfirmationResponse
+    processConfirmationResponse,
+    addDisambiguationOptions,
+    confirmAction,
+    cancelConfirmation
 } from '../utils/confirmationHandler.js';
+import { getAllReminders, getReminderStats } from '../models/reminderModel.js';
+import { formatFriendlyTime, formatFriendlyDate } from '../utils/dateUtils.js';
+
+// User conversation context tracking
+const userContexts = new Map();
 
 /**
  * Create a Twilio Media Stream handler
@@ -41,13 +50,37 @@ export function setupMediaStreamHandler(connection, req) {
         currentAssistantResponse: '',
         timeUpdateInterval: null,
         awaitingConfirmation: false,
-        lastTimeUpdate: Date.now()
+        awaitingDisambiguation: false,
+        lastTimeUpdate: Date.now(),
+        conversationHistory: [], // Track conversation for context
+        lastReminderAction: null, // Track last reminder action for follow-ups
+        lastMentionedReminders: null // Store reminders mentioned for follow-ups
     };
 
     // Extract caller phone number from Twilio if available
     if (req.query && req.query.From) {
         state.callerPhoneNumber = req.query.From;
         logger.info(`Caller phone number: ${state.callerPhoneNumber}`);
+
+        // Initialize or retrieve user context
+        if (!userContexts.has(state.callerPhoneNumber)) {
+            userContexts.set(state.callerPhoneNumber, {
+                lastInteraction: new Date(),
+                reminderStats: null,
+                conversationTopics: []
+            });
+        }
+
+        // Update last interaction time
+        const userContext = userContexts.get(state.callerPhoneNumber);
+        userContext.lastInteraction = new Date();
+
+        // Get user's reminder statistics for personalized experience
+        try {
+            userContext.reminderStats = getReminderStats(state.callerPhoneNumber);
+        } catch (error) {
+            logger.error('Error getting user reminder stats:', error);
+        }
     }
 
     // Get OpenAI connection
@@ -108,10 +141,56 @@ export function setupMediaStreamHandler(connection, req) {
     };
 
     /**
-     * Process user's transcribed input for confirmations and reminders
+     * Process user's transcribed input for confirmations, disambiguations, and reminders
+     * Enhanced with better context tracking
      * @param {string} transcript User's transcribed input
      */
     const processUserInput = (transcript) => {
+        // Store in conversation history
+        state.conversationHistory.push({
+            role: 'user',
+            content: transcript,
+            timestamp: new Date()
+        });
+
+        // Check if we're awaiting disambiguation
+        if (state.awaitingDisambiguation && state.lastMentionedReminders) {
+            const selectedReminder = processDisambiguationResponse(transcript, state.lastMentionedReminders);
+
+            if (selectedReminder) {
+                // User selected a specific reminder from options
+                logger.info(`User selected reminder: ${selectedReminder.task}`);
+
+                // Proceed with the pending action on the selected reminder
+                if (state.lastReminderAction) {
+                    let messageToAssistant;
+
+                    switch (state.lastReminderAction) {
+                        case 'cancel':
+                            messageToAssistant = `I'll cancel your reminder "${selectedReminder.task}" scheduled for ${formatFriendlyTime(selectedReminder.triggerTime)} on ${formatFriendlyDate(selectedReminder.triggerTime)}. Is that correct?`;
+                            break;
+                        case 'reschedule':
+                            messageToAssistant = `I'll reschedule your reminder "${selectedReminder.task}". What time would you like to reschedule it to?`;
+                            break;
+                        default:
+                            messageToAssistant = `You selected the reminder "${selectedReminder.task}". What would you like to do with it?`;
+                    }
+
+                    // Send message to assistant
+                    sendSystemMessage(openAiWs, messageToAssistant);
+
+                    // Reset disambiguation but set the context for follow-up
+                    state.awaitingDisambiguation = false;
+                    state.lastMentionedReminders = [selectedReminder];
+                    return;
+                }
+            } else {
+                // Couldn't determine which reminder was selected
+                sendSystemMessage(openAiWs, "I'm not sure which reminder you're referring to. Could you be more specific or choose one of the options I provided?");
+                return;
+            }
+        }
+
         // Check if we're awaiting confirmation
         if (state.callerPhoneNumber) {
             const pendingConfirmation = getPendingConfirmation(state.callerPhoneNumber);
@@ -156,6 +235,9 @@ export function setupMediaStreamHandler(connection, req) {
 
                             // Send the confirmation as a system message to OpenAI
                             sendSystemMessage(openAiWs, confirmationMessage);
+
+                            // Update conversation context
+                            state.lastReminderAction = confirmationResult.action;
                         } else {
                             sendSystemMessage(openAiWs, "I wasn't able to process that action. Could you try asking me again?");
                         }
@@ -165,15 +247,142 @@ export function setupMediaStreamHandler(connection, req) {
                         // User rejected the action
                         sendSystemMessage(openAiWs, "No problem, I won't make that change.");
                         state.awaitingConfirmation = false;
+                    } else if (confirmationResult.needsExplicitConfirmation) {
+                        // User selected an option, now we need explicit confirmation
+                        let confirmationMessage;
+
+                        switch (confirmationResult.action) {
+                            case 'cancel':
+                                confirmationMessage = `You want to cancel the reminder "${confirmationResult.selectedOption.task}" scheduled for ${confirmationResult.selectedOption.friendlyTime}. Is that correct?`;
+                                break;
+                            case 'reschedule':
+                                confirmationMessage = `You want to reschedule the reminder "${confirmationResult.selectedOption.task}". Is that correct?`;
+                                break;
+                            default:
+                                confirmationMessage = `You selected "${confirmationResult.selectedOption.task}". Is that correct?`;
+                        }
+
+                        sendSystemMessage(openAiWs, confirmationMessage);
+                        state.awaitingConfirmation = true;
                     } else if (confirmationResult.needsMoreClarification) {
                         // Need more clarification
-                        sendSystemMessage(openAiWs, "I'm not sure if you want to proceed. Please say yes or no.");
+                        let clarificationMessage = "I'm not sure if you want to proceed. ";
+
+                        // More specific guidance based on attempts
+                        if (confirmationResult.attempts > 1) {
+                            clarificationMessage += "Please clearly say 'yes' or 'no'.";
+                        } else {
+                            clarificationMessage += "Please say yes or no.";
+                        }
+
+                        sendSystemMessage(openAiWs, clarificationMessage);
                         state.awaitingConfirmation = true;
                     }
                 }
             } else {
                 state.awaitingConfirmation = false;
+
+                // Check for context-aware follow-up requests
+                processFollowUpRequest(transcript);
             }
+        }
+    };
+
+    /**
+     * Process potential follow-up requests based on conversation context
+     * @param {string} transcript User's transcribed input
+     */
+    const processFollowUpRequest = (transcript) => {
+        // Don't process if we're in the middle of a confirmation or disambiguation
+        if (state.awaitingConfirmation || state.awaitingDisambiguation) {
+            return;
+        }
+
+        const lowerTranscript = transcript.toLowerCase();
+
+        // Check for contextual follow-ups like "cancel that" or "reschedule it"
+        const followUpTriggers = {
+            cancel: ['cancel it', 'cancel that', 'delete it', 'delete that', 'remove it', 'remove that'],
+            reschedule: ['reschedule it', 'reschedule that', 'change it', 'change that', 'move it', 'move that'],
+            remind: ['remind me again', 'what was that reminder', 'repeat that reminder']
+        };
+
+        // Check for cancel follow-up
+        if (followUpTriggers.cancel.some(trigger => lowerTranscript.includes(trigger)) && state.lastMentionedReminders) {
+            if (state.lastMentionedReminders.length === 1) {
+                // We have a single reminder from context
+                const reminder = state.lastMentionedReminders[0];
+
+                // Send confirmation request
+                sendSystemMessage(openAiWs, `Do you want to cancel your reminder "${reminder.task}" scheduled for ${formatFriendlyTime(reminder.triggerTime)}?`);
+
+                // Set up confirmation
+                if (state.callerPhoneNumber) {
+                    const confirmData = {
+                        task: reminder.task,
+                        reminderId: reminder.id
+                    };
+
+                    import('../utils/confirmationHandler.js').then(({ createConfirmation }) => {
+                        createConfirmation(state.callerPhoneNumber, 'cancel', confirmData);
+                        state.awaitingConfirmation = true;
+                        state.lastReminderAction = 'cancel';
+                    });
+                }
+            } else if (state.lastMentionedReminders.length > 1) {
+                // Multiple reminders, we need disambiguation
+                const reminderOptions = state.lastMentionedReminders.map((r, i) =>
+                    `${i + 1}. "${r.task}" at ${formatFriendlyTime(r.triggerTime)}`
+                ).join('\n');
+
+                sendSystemMessage(openAiWs, `Which reminder would you like to cancel?\n${reminderOptions}\n\nPlease specify by number or description.`);
+                state.awaitingDisambiguation = true;
+                state.lastReminderAction = 'cancel';
+            }
+            return;
+        }
+
+        // Check for reschedule follow-up
+        if (followUpTriggers.reschedule.some(trigger => lowerTranscript.includes(trigger)) && state.lastMentionedReminders) {
+            if (state.lastMentionedReminders.length === 1) {
+                // We have a single reminder from context
+                const reminder = state.lastMentionedReminders[0];
+
+                // Send reschedule request
+                sendSystemMessage(openAiWs, `When would you like to reschedule your reminder "${reminder.task}" to?`);
+
+                // Set up for the next part of the conversation
+                state.lastReminderAction = 'reschedule';
+            } else if (state.lastMentionedReminders.length > 1) {
+                // Multiple reminders, we need disambiguation
+                const reminderOptions = state.lastMentionedReminders.map((r, i) =>
+                    `${i + 1}. "${r.task}" at ${formatFriendlyTime(r.triggerTime)}`
+                ).join('\n');
+
+                sendSystemMessage(openAiWs, `Which reminder would you like to reschedule?\n${reminderOptions}\n\nPlease specify by number or description.`);
+                state.awaitingDisambiguation = true;
+                state.lastReminderAction = 'reschedule';
+            }
+            return;
+        }
+
+        // Check for reminder info follow-up
+        if (followUpTriggers.remind.some(trigger => lowerTranscript.includes(trigger)) && state.lastMentionedReminders) {
+            if (state.lastMentionedReminders.length === 1) {
+                // We have a single reminder from context
+                const reminder = state.lastMentionedReminders[0];
+
+                // Send reminder details
+                sendSystemMessage(openAiWs, `Your reminder "${reminder.task}" is scheduled for ${formatFriendlyTime(reminder.triggerTime)} on ${formatFriendlyDate(reminder.triggerTime)}.`);
+            } else if (state.lastMentionedReminders.length > 1) {
+                // Summarize multiple reminders
+                const reminderSummary = state.lastMentionedReminders.map(r =>
+                    `• "${r.task}" at ${formatFriendlyTime(r.triggerTime)} on ${formatFriendlyDate(r.triggerTime)}`
+                ).join('\n');
+
+                sendSystemMessage(openAiWs, `Here are your reminders:\n${reminderSummary}`);
+            }
+            return;
         }
     };
 
@@ -187,20 +396,68 @@ export function setupMediaStreamHandler(connection, req) {
                 logger.assistantMessage(response.transcript);
                 state.currentAssistantResponse = response.transcript;
 
+                // Store in conversation history
+                state.conversationHistory.push({
+                    role: 'assistant',
+                    content: response.transcript,
+                    timestamp: new Date()
+                });
+
                 // Process the complete response for reminder extraction
-                if (!state.awaitingConfirmation) {
-                    // Check if response contains reminder data that needs time handling
-                    const reminderData = extractReminderFromText(response.transcript);
+                if (!state.awaitingConfirmation && !state.awaitingDisambiguation) {
+                    // First check if the response contains a list of reminders
+                    if (response.transcript.toLowerCase().includes('check your reminders') ||
+                        response.transcript.toLowerCase().includes('your reminders')) {
 
-                    if (reminderData &&
-                        (reminderData.action === 'create' || reminderData.action === 'reschedule') &&
-                        reminderData.time && reminderData.date) {
+                        // Check if response contains reminder data
+                        const reminderData = extractReminderFromText(response.transcript);
 
-                        // Pass openAiWs to ensure time status is communicated
-                        processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
+                        if (reminderData && reminderData.action === 'list') {
+                            // Process list request - THIS IS THE CRITICAL FIX
+                            logger.info('Processing reminder list request');
+
+                            // Get all reminders regardless of phone number for now (for testing)
+                            const allReminders = getAllReminders();
+                            const pendingReminders = allReminders.filter(r => r.status === 'pending');
+
+                            // Format the reminder list for speaking
+                            let reminderListMessage;
+
+                            if (pendingReminders.length === 0) {
+                                reminderListMessage = "You don't have any reminders at the moment.";
+                            } else {
+                                // Format the reminders in a way that sounds natural when spoken
+                                const formattedReminders = pendingReminders.map(r => {
+                                    const time = formatFriendlyTime(r.triggerTime);
+                                    const date = formatFriendlyDate(r.triggerTime);
+                                    return `${r.task} at ${time} on ${date}`;
+                                });
+
+                                // Join with proper speech pauses
+                                if (formattedReminders.length === 1) {
+                                    reminderListMessage = `You have one reminder: ${formattedReminders[0]}.`;
+                                } else {
+                                    const lastReminder = formattedReminders.pop();
+                                    reminderListMessage = `You have ${pendingReminders.length} reminders: ${formattedReminders.join(', ')} and ${lastReminder}.`;
+                                }
+                            }
+
+                            // Send the formatted message to be read aloud after a short delay
+                            // The delay ensures the initial "Let me check your reminders" is spoken first
+                            setTimeout(() => {
+                                logger.info(`Sending reminder list to be read: ${reminderListMessage}`);
+                                sendSystemMessage(openAiWs, reminderListMessage);
+                            }, 1500);
+
+                            // Update state for context
+                            state.lastMentionedReminders = pendingReminders;
+                        } else {
+                            // Regular processing for other reminder types
+                            processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
+                        }
                     } else {
-                        // Regular processing without WebSocket
-                        processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber);
+                        // Regular processing for non-list reminder actions
+                        processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
                     }
                 }
             }
@@ -218,7 +475,7 @@ export function setupMediaStreamHandler(connection, req) {
                 if (response.transcript) {
                     logger.userMessage(response.transcript);
 
-                    // Process the user's input for confirmations
+                    // Process the user's input for confirmations and follow-ups
                     processUserInput(response.transcript);
 
                     state.currentUserTranscript = '';
@@ -274,7 +531,45 @@ export function setupMediaStreamHandler(connection, req) {
                         initializeSession(openAiWs)
                             .then(() => {
                                 state.sessionInitialized = true;
-                                sendInitialConversation(openAiWs);
+
+                                // If caller is a returning user with reminders, provide a personalized greeting
+                                if (state.callerPhoneNumber) {
+                                    const userContext = userContexts.get(state.callerPhoneNumber);
+
+                                    if (userContext && userContext.reminderStats && userContext.reminderStats.counts.pending > 0) {
+                                        // User has pending reminders, mention them
+                                        const nextReminder = userContext.reminderStats.nextReminder;
+                                        let personalizedGreeting;
+
+                                        if (nextReminder) {
+                                            personalizedGreeting = `Hello! Welcome back. You currently have ${userContext.reminderStats.counts.pending} pending reminders. Your next reminder is "${nextReminder.task}" at ${nextReminder.friendlyTime}.`;
+                                        } else {
+                                            personalizedGreeting = `Hello! Welcome back. You currently have ${userContext.reminderStats.counts.pending} pending reminders.`;
+                                        }
+
+                                        // Send personalized greeting as system message
+                                        setTimeout(() => {
+                                            sendSystemMessage(openAiWs, personalizedGreeting);
+                                        }, 1000);
+
+                                        // Update conversation context
+                                        if (nextReminder) {
+                                            state.lastMentionedReminders = [{
+                                                id: nextReminder.id,
+                                                task: nextReminder.task,
+                                                triggerTime: new Date(nextReminder.triggerTime),
+                                                friendlyTime: nextReminder.friendlyTime,
+                                                friendlyDate: nextReminder.friendlyDate
+                                            }];
+                                        }
+                                    } else {
+                                        // Regular greeting for new user or user without reminders
+                                        sendInitialConversation(openAiWs);
+                                    }
+                                } else {
+                                    // Regular greeting for unknown user
+                                    sendInitialConversation(openAiWs);
+                                }
 
                                 // Check if user has pending confirmations
                                 if (state.callerPhoneNumber) {
@@ -334,6 +629,28 @@ export function setupMediaStreamHandler(connection, req) {
         clearInterval(state.timeUpdateInterval);
         returnConnectionToPool(openAiWs);
         logger.info('Client disconnected.');
+
+        // If caller had a phone number, update their context with conversation summary
+        if (state.callerPhoneNumber && userContexts.has(state.callerPhoneNumber)) {
+            const userContext = userContexts.get(state.callerPhoneNumber);
+
+            // Extract conversation topics from the history
+            if (state.conversationHistory.length > 0) {
+                // This would be more sophisticated in a full implementation,
+                // but for now just track if they used reminders
+                const reminderActions = state.conversationHistory.filter(item =>
+                    item.content.toLowerCase().includes('remind') ||
+                    item.content.toLowerCase().includes('schedule')
+                ).length;
+
+                if (reminderActions > 0) {
+                    userContext.conversationTopics.push('reminders');
+                }
+
+                // Store last interaction time
+                userContext.lastInteraction = new Date();
+            }
+        }
     });
 
     // Handle WebSocket errors
