@@ -274,23 +274,38 @@ export function processAssistantResponseForReminders(transcript, phoneNumber, op
     logger.info(`Detected reminder request with action: ${reminderData.action}`, reminderData);
 
     // Handle different reminder actions
+    let result;
     switch (reminderData.action) {
         case 'create':
-            return handleCreateReminder(reminderData, phoneNumber, openAiWs);
+            result = handleCreateReminder(reminderData, phoneNumber, openAiWs);
+            break;
 
         case 'list':
-            return handleListReminders(phoneNumber);
+            result = handleListReminders(phoneNumber);
+            // If we have a list result, send it back to be read by the assistant
+            if (result && result.success && openAiWs) {
+                // Only send after a short delay to ensure the initial response is finished
+                setTimeout(() => {
+                    logger.info(`Sending reminder list to be read: ${result.displayMessage}`);
+                    sendSystemMessage(openAiWs, result.displayMessage);
+                }, 1500);
+            }
+            break;
 
         case 'cancel':
-            return handleCancelReminder(reminderData, phoneNumber, openAiWs);
+            result = handleCancelReminder(reminderData, phoneNumber, openAiWs);
+            break;
 
         case 'reschedule':
-            return handleRescheduleReminder(reminderData, phoneNumber, openAiWs);
+            result = handleRescheduleReminder(reminderData, phoneNumber, openAiWs);
+            break;
 
         default:
             logger.warn(`Unknown reminder action: ${reminderData.action}`);
             return null;
     }
+
+    return result;
 }
 
 /**
@@ -373,7 +388,8 @@ function handleListReminders(phoneNumber) {
         success: true,
         reminders: formattedReminders,
         count: pendingReminders.length,
-        displayMessage: displayMessage  // This will be read aloud
+        displayMessage: displayMessage,  // This will be read aloud
+        requiresDisambiguation: false    // Add this flag to explicitly indicate no disambiguation needed
     };
 }
 

@@ -1,4 +1,4 @@
-// services/twilioService.js - Enhanced with contextual understanding
+// services/twilioService.js - Enhanced with contextual understanding and bug fix
 import { logger } from '../utils/logger.js';
 import {
     getOpenAiConnection,
@@ -403,60 +403,57 @@ export function setupMediaStreamHandler(connection, req) {
                     timestamp: new Date()
                 });
 
-                // Process the complete response for reminder extraction
-                if (!state.awaitingConfirmation && !state.awaitingDisambiguation) {
-                    // First check if the response contains a list of reminders
-                    if (response.transcript.toLowerCase().includes('check your reminders') ||
-                        response.transcript.toLowerCase().includes('your reminders')) {
+                // Extract reminder data from the transcript (if any)
+                const reminderData = extractReminderFromText(response.transcript);
 
-                        // Check if response contains reminder data
-                        const reminderData = extractReminderFromText(response.transcript);
+                // Critical fix: Only process reminder actions if we found valid reminder data
+                // and we're not already in a confirmation or disambiguation flow
+                if (reminderData && !state.awaitingConfirmation && !state.awaitingDisambiguation) {
+                    logger.info(`Detected reminder request with action: ${reminderData.action}`, reminderData);
 
-                        if (reminderData && reminderData.action === 'list') {
-                            // Process list request - THIS IS THE CRITICAL FIX
-                            logger.info('Processing reminder list request');
+                    // SPECIAL HANDLING FOR LIST ACTION
+                    if (reminderData.action === 'list') {
+                        // Get all reminders for this user
+                        const allReminders = getAllReminders(state.callerPhoneNumber);
+                        const pendingReminders = allReminders.filter(r => r.status === 'pending');
 
-                            // Get all reminders regardless of phone number for now (for testing)
-                            const allReminders = getAllReminders();
-                            const pendingReminders = allReminders.filter(r => r.status === 'pending');
+                        // Format the reminder list for speaking
+                        let reminderListMessage;
+                        if (pendingReminders.length === 0) {
+                            reminderListMessage = "You don't have any reminders at the moment.";
+                            // Clear context since there are no reminders
+                            state.lastMentionedReminders = null;
+                        } else {
+                            // Format reminders in a way that sounds natural when spoken
+                            const formattedReminders = pendingReminders.map(r => {
+                                const time = formatFriendlyTime(r.triggerTime);
+                                const date = formatFriendlyDate(r.triggerTime);
+                                return `${r.task} at ${time} on ${date}`;
+                            });
 
-                            // Format the reminder list for speaking
-                            let reminderListMessage;
-
-                            if (pendingReminders.length === 0) {
-                                reminderListMessage = "You don't have any reminders at the moment.";
+                            // Join with proper speech pauses
+                            if (formattedReminders.length === 1) {
+                                reminderListMessage = `You have one reminder: ${formattedReminders[0]}.`;
                             } else {
-                                // Format the reminders in a way that sounds natural when spoken
-                                const formattedReminders = pendingReminders.map(r => {
-                                    const time = formatFriendlyTime(r.triggerTime);
-                                    const date = formatFriendlyDate(r.triggerTime);
-                                    return `${r.task} at ${time} on ${date}`;
-                                });
-
-                                // Join with proper speech pauses
-                                if (formattedReminders.length === 1) {
-                                    reminderListMessage = `You have one reminder: ${formattedReminders[0]}.`;
-                                } else {
-                                    const lastReminder = formattedReminders.pop();
-                                    reminderListMessage = `You have ${pendingReminders.length} reminders: ${formattedReminders.join(', ')} and ${lastReminder}.`;
-                                }
+                                const lastReminder = formattedReminders.pop();
+                                reminderListMessage = `You have ${pendingReminders.length} reminders: ${formattedReminders.join(', ')} and ${lastReminder}.`;
                             }
 
-                            // Send the formatted message to be read aloud after a short delay
-                            // The delay ensures the initial "Let me check your reminders" is spoken first
-                            setTimeout(() => {
-                                logger.info(`Sending reminder list to be read: ${reminderListMessage}`);
-                                sendSystemMessage(openAiWs, reminderListMessage);
-                            }, 1500);
-
-                            // Update state for context
+                            // Update state context with actual reminder objects
                             state.lastMentionedReminders = pendingReminders;
-                        } else {
-                            // Regular processing for other reminder types
-                            processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
                         }
+
+                        // Send the formatted message to be read aloud after a short delay
+                        // The delay ensures the initial "Let me check your reminders" is spoken first
+                        setTimeout(() => {
+                            logger.info(`Sending reminder list to be read: ${reminderListMessage}`);
+                            sendSystemMessage(openAiWs, reminderListMessage);
+                        }, 1500);
+
+                        // *** CRITICAL FIX: Ensure we're not in disambiguation mode ***
+                        state.awaitingDisambiguation = false;
                     } else {
-                        // Regular processing for non-list reminder actions
+                        // For non-list actions, use the standard processing function
                         processAssistantResponseForReminders(response.transcript, state.callerPhoneNumber, openAiWs);
                     }
                 }
@@ -607,6 +604,8 @@ export function setupMediaStreamHandler(connection, req) {
                     state.lastTranscriptId = null;
                     state.currentAssistantResponse = '';
                     state.lastTimeUpdate = Date.now();
+                    state.awaitingDisambiguation = false;
+                    state.awaitingConfirmation = false;
                     break;
 
                 case 'mark':
