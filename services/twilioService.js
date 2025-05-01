@@ -1,6 +1,6 @@
 // services/twilioService.js - Twilio media stream handling
 import { logger } from '../utils/logger.js';
-import { getOpenAiConnection, initializeSession, sendInitialConversation, truncateAssistantResponse, sendAudioBuffer, sendTimeUpdate, returnConnectionToPool } from './openaiService.js';
+import { getOpenAiConnection, initializeSession, sendInitialConversation, truncateAssistantResponse, sendAudioBuffer, sendTimeUpdate, closeConnection } from './openaiService.js';
 import { processAssistantResponseForReminders } from './reminderService.js';
 
 /**
@@ -32,7 +32,7 @@ export function setupMediaStreamHandler(connection, req) {
         logger.info(`Caller phone number: ${state.callerPhoneNumber}`);
     }
 
-    // Get OpenAI connection
+    // Create a new OpenAI connection 
     const openAiWs = getOpenAiConnection();
 
     // Setup time updates
@@ -191,7 +191,7 @@ export function setupMediaStreamHandler(connection, req) {
     // Handle connection close
     connection.on('close', () => {
         clearInterval(state.timeUpdateInterval);
-        returnConnectionToPool(openAiWs);
+        closeConnection(openAiWs); // Close the connection instead of returning it to pool
         logger.info('Client disconnected.');
     });
 

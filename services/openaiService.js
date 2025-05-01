@@ -1,78 +1,30 @@
-// services/openaiService.js - OpenAI connection pooling and interaction
+// services/openaiService.js - OpenAI interaction without connection pooling
 import WebSocket from 'ws';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 import { getSystemMessageWithTime } from '../utils/dateUtils.js';
 
-// Connection pool for OpenAI WebSockets
-const openAiConnectionPool = [];
-
 /**
- * Pre-establish OpenAI connections for faster response
- */
-export function prepareOpenAiConnections() {
-    const currentPoolSize = openAiConnectionPool.length;
-    const connectionsToCreate = config.OPENAI_MAX_POOL_SIZE - currentPoolSize;
-
-    logger.info(`Preparing ${connectionsToCreate} OpenAI connections (current pool: ${currentPoolSize})`);
-
-    for (let i = 0; i < connectionsToCreate; i++) {
-        const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${config.OPENAI_MODEL}`, {
-            headers: {
-                Authorization: `Bearer ${config.OPENAI_API_KEY}`,
-                "OpenAI-Beta": "realtime=v1"
-            }
-        });
-
-        ws.on('open', () => {
-            logger.info(`Pre-warmed OpenAI connection ${openAiConnectionPool.length + 1} ready`);
-            openAiConnectionPool.push(ws);
-        });
-
-        ws.on('error', (err) => {
-            logger.error(`Error with pre-warmed connection ${i}:`, err);
-        });
-
-        ws.on('close', () => {
-            // Remove from pool when closed
-            const index = openAiConnectionPool.indexOf(ws);
-            if (index > -1) openAiConnectionPool.splice(index, 1);
-
-            // Replace the closed connection
-            setTimeout(() => prepareOpenAiConnections(), 1000);
-        });
-    }
-}
-
-/**
- * Get an OpenAI connection from the pool or create a new one
+ * Create a new OpenAI connection
  * @returns {WebSocket} An OpenAI WebSocket connection
  */
 export function getOpenAiConnection() {
-    if (openAiConnectionPool.length > 0) {
-        const connection = openAiConnectionPool.pop();
-        logger.info('Using pre-warmed OpenAI connection');
-        return connection;
-    } else {
-        logger.info('Creating new OpenAI connection (pool empty)');
-        return new WebSocket(`wss://api.openai.com/v1/realtime?model=${config.OPENAI_MODEL}`, {
-            headers: {
-                Authorization: `Bearer ${config.OPENAI_API_KEY}`,
-                "OpenAI-Beta": "realtime=v1"
-            }
-        });
-    }
+    logger.info('Creating new OpenAI connection');
+    return new WebSocket(`wss://api.openai.com/v1/realtime?model=${config.OPENAI_MODEL}`, {
+        headers: {
+            Authorization: `Bearer ${config.OPENAI_API_KEY}`,
+            "OpenAI-Beta": "realtime=v1"
+        }
+    });
 }
 
 /**
- * Return a connection to the pool if it's still usable
+ * Close the WebSocket connection
  * @param {WebSocket} connection The WebSocket connection
  */
-export function returnConnectionToPool(connection) {
+export function closeConnection(connection) {
     if (connection && connection.readyState === WebSocket.OPEN) {
-        logger.info('Returning OpenAI connection to pool');
-        openAiConnectionPool.push(connection);
-    } else if (connection) {
+        logger.info('Closing OpenAI connection');
         connection.close();
     }
 }

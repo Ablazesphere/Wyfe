@@ -12,7 +12,6 @@ import { setupCallRoutes } from './controllers/callController.js';
 import { setupReminderRoutes } from './controllers/reminderController.js';
 
 // Import services
-import { prepareOpenAiConnections } from './services/openaiService.js';
 import { logger } from './utils/logger.js';
 import { config } from './config/config.js';
 
@@ -33,9 +32,6 @@ fastify.get('/', async (request, reply) => {
 // Start the server
 const startServer = async () => {
     try {
-        // Pre-establish OpenAI connections
-        prepareOpenAiConnections();
-
         await fastify.listen({ port: config.PORT });
         logger.info(`Server is listening on port ${config.PORT}`);
     } catch (err) {

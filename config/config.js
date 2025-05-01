@@ -18,7 +18,6 @@ export const config = {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     OPENAI_MODEL: 'gpt-4o-mini-realtime-preview-2024-12-17',
     OPENAI_VOICE: 'shimmer',
-    OPENAI_MAX_POOL_SIZE: 5,
 
     // System message
     SYSTEM_MESSAGE_BASE: 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.\n\n' +
