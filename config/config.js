@@ -19,6 +19,11 @@ export const config = {
     OPENAI_MODEL: 'gpt-4o-mini-realtime-preview-2024-12-17',
     OPENAI_VOICE: 'shimmer',
 
+    // Greeting preload config
+    GREETING_PRELOAD_ENABLED: process.env.GREETING_PRELOAD_ENABLED !== 'false', // Enable by default
+    GREETING_CACHE_TTL: parseInt(process.env.GREETING_CACHE_TTL || '3600000', 10), // 1 hour in ms
+    GREETING_TEXT: process.env.GREETING_TEXT || 'Hello there! I\'m your reminder assistant. How can I help you today?',
+
     // System message
     SYSTEM_MESSAGE_BASE: 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.\n\n' +
         'REMINDERS FUNCTIONALITY (Important):\n' +

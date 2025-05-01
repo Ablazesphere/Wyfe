@@ -1,8 +1,18 @@
-// services/openaiService.js - OpenAI interaction without connection pooling
+// services/openaiService.js - OpenAI interaction with preloading support
 import WebSocket from 'ws';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 import { getSystemMessageWithTime } from '../utils/dateUtils.js';
+
+/**
+ * Maintains a cache of pregenerated greeting audio responses
+ */
+let greetingAudioCache = {
+    buffer: null,
+    itemId: null,
+    lastGenerated: null,
+    isGenerating: false
+};
 
 /**
  * Create a new OpenAI connection
@@ -172,4 +182,154 @@ export function sendAudioBuffer(openAiWs, audioData) {
     };
 
     openAiWs.send(JSON.stringify(audioAppend));
+}
+
+/**
+ * Preload greeting audio to eliminate initial silence
+ * @returns {Promise} Resolves when audio is cached
+ */
+export function preloadGreetingAudio() {
+    // If we're already generating or have a recent cache, don't regenerate
+    if (greetingAudioCache.isGenerating) return Promise.resolve();
+
+    const now = new Date();
+    const cacheAge = greetingAudioCache.lastGenerated ?
+        (now - greetingAudioCache.lastGenerated) : Infinity;
+
+    // Only regenerate if cache is older than the TTL
+    if (greetingAudioCache.buffer && cacheAge < config.GREETING_CACHE_TTL) return Promise.resolve();
+
+    greetingAudioCache.isGenerating = true;
+    logger.info('Preloading greeting audio...');
+
+    return new Promise((resolve, reject) => {
+        // Create a temporary WebSocket connection just for preloading
+        const tempWs = getOpenAiConnection();
+        let audioData = [];
+        let responseItemId = null;
+
+        tempWs.on('open', () => {
+            // Initialize session
+            initializeSession(tempWs)
+                .then(() => {
+                    // Send greeting request
+                    const greetingRequest = {
+                        type: 'conversation.item.create',
+                        item: {
+                            type: 'message',
+                            role: 'user',
+                            content: [
+                                {
+                                    type: 'input_text',
+                                    text: config.GREETING_TEXT
+                                }
+                            ]
+                        }
+                    };
+
+                    tempWs.send(JSON.stringify(greetingRequest));
+
+                    // Request response
+                    tempWs.send(JSON.stringify({
+                        type: 'response.create'
+                    }));
+                })
+                .catch(err => {
+                    logger.error('Failed to initialize preload session:', err);
+                    tempWs.close();
+                    greetingAudioCache.isGenerating = false;
+                    reject(err);
+                });
+        });
+
+        tempWs.on('message', (data) => {
+            try {
+                const message = JSON.parse(data);
+
+                // Collect audio data
+                if (message.type === 'response.audio.delta' && message.delta) {
+                    audioData.push(message.delta);
+
+                    if (message.item_id && !responseItemId) {
+                        responseItemId = message.item_id;
+                    }
+                }
+
+                // When audio generation is complete
+                if (message.type === 'response.audio_transcript.done') {
+                    logger.info('Greeting audio preloaded successfully');
+
+                    // Cache the audio buffer and item ID
+                    greetingAudioCache = {
+                        buffer: audioData,
+                        itemId: responseItemId,
+                        lastGenerated: new Date(),
+                        isGenerating: false
+                    };
+
+                    // Close the temporary connection
+                    tempWs.close();
+                    resolve();
+                }
+            } catch (error) {
+                logger.error('Error processing preload message:', error);
+            }
+        });
+
+        tempWs.on('error', (error) => {
+            logger.error('Error in preload connection:', error);
+            greetingAudioCache.isGenerating = false;
+            tempWs.close();
+            reject(error);
+        });
+
+        // Set timeout to prevent hanging
+        setTimeout(() => {
+            if (greetingAudioCache.isGenerating) {
+                logger.warn('Preload timed out after 10 seconds');
+                greetingAudioCache.isGenerating = false;
+                tempWs.close();
+                reject(new Error('Preload timed out'));
+            }
+        }, 10000);
+    });
+}
+
+/**
+ * Sends preloaded greeting audio to the client
+ * @param {WebSocket} connection Twilio WebSocket connection 
+ * @param {string} streamSid Twilio stream SID
+ * @returns {boolean} True if sent successfully, false otherwise
+ */
+export function sendPreloadedGreeting(connection, streamSid) {
+    if (!greetingAudioCache.buffer || !streamSid) {
+        logger.warn('No preloaded greeting available or missing streamSid');
+        return false;
+    }
+
+    logger.info(`Sending preloaded greeting for stream ${streamSid}`);
+
+    try {
+        // Send each audio buffer chunk to the client
+        greetingAudioCache.buffer.forEach(chunk => {
+            const audioDelta = {
+                event: 'media',
+                streamSid: streamSid,
+                media: { payload: chunk }
+            };
+            connection.send(JSON.stringify(audioDelta));
+        });
+
+        // Send mark event
+        connection.send(JSON.stringify({
+            event: 'mark',
+            streamSid: streamSid,
+            mark: { name: 'preloadedGreeting' }
+        }));
+
+        return true;
+    } catch (err) {
+        logger.error('Error sending preloaded greeting:', err);
+        return false;
+    }
 }

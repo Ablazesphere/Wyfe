@@ -1,6 +1,15 @@
 // services/twilioService.js - Twilio media stream handling
 import { logger } from '../utils/logger.js';
-import { getOpenAiConnection, initializeSession, sendInitialConversation, truncateAssistantResponse, sendAudioBuffer, sendTimeUpdate, closeConnection } from './openaiService.js';
+import {
+    getOpenAiConnection,
+    initializeSession,
+    sendInitialConversation,
+    truncateAssistantResponse,
+    sendAudioBuffer,
+    sendTimeUpdate,
+    closeConnection,
+    sendPreloadedGreeting  // Import the new function
+} from './openaiService.js';
 import { processAssistantResponseForReminders } from './reminderService.js';
 
 /**
@@ -155,12 +164,24 @@ export function setupMediaStreamHandler(connection, req) {
                     state.streamSid = data.start.streamSid;
                     logger.info('Incoming stream has started', state.streamSid);
 
-                    // Initialize the session as soon as the stream starts
+                    // Send preloaded greeting immediately
+                    const greetingSent = sendPreloadedGreeting(connection, state.streamSid);
+                    logger.info(greetingSent ? 'Sent preloaded greeting' : 'No preloaded greeting available');
+
+                    // Initialize the session regardless of whether greeting was sent
                     if (!state.sessionInitialized) {
                         initializeSession(openAiWs)
                             .then(() => {
                                 state.sessionInitialized = true;
-                                sendInitialConversation(openAiWs);
+
+                                // Only send the initial conversation if we didn't use preloaded greeting
+                                if (!greetingSent) {
+                                    sendInitialConversation(openAiWs);
+                                } else {
+                                    // If we sent the greeting, we should still initialize the conversation state
+                                    // but we don't need to send another greeting
+                                    logger.info('Using preloaded greeting, skipping initial conversation');
+                                }
                             })
                             .catch(err => logger.error('Failed to initialize session:', err));
                     }

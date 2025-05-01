@@ -14,6 +14,7 @@ import { setupReminderRoutes } from './controllers/reminderController.js';
 // Import services
 import { logger } from './utils/logger.js';
 import { config } from './config/config.js';
+import { preloadGreetingAudio } from './services/openaiService.js';
 
 // Initialize Fastify
 const fastify = Fastify();
@@ -29,13 +30,65 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server with Reminders is running!' });
 });
 
+// Health check route
+fastify.get('/health', async (request, reply) => {
+    reply.send({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Start the server
 const startServer = async () => {
     try {
-        await fastify.listen({ port: config.PORT });
-        logger.info(`Server is listening on port ${config.PORT}`);
+        await fastify.listen({ port: config.PORT })
+            .then(() => {
+                logger.info(`Server is listening on port ${config.PORT}`);
+
+                // Preload greeting audio on server start
+                if (config.GREETING_PRELOAD_ENABLED) {
+                    return preloadGreetingAudio()
+                        .then(() => {
+                            logger.info('Greeting audio preloaded successfully');
+                        })
+                        .catch(err => {
+                            logger.warn('Failed to preload greeting audio:', err);
+                            // Continue running even if preloading fails
+                        });
+                } else {
+                    logger.info('Greeting preloading is disabled');
+                    return Promise.resolve();
+                }
+            });
+
+        // Periodically refresh the greeting audio cache
+        if (config.GREETING_PRELOAD_ENABLED) {
+            setInterval(() => {
+                preloadGreetingAudio()
+                    .then(() => logger.debug('Refreshed greeting audio cache'))
+                    .catch(err => logger.warn('Failed to refresh greeting cache:', err));
+            }, config.GREETING_CACHE_TTL); // Refresh based on configured TTL
+        }
+
+        // Handle graceful shutdown
+        process.on('SIGINT', () => gracefulShutdown());
+        process.on('SIGTERM', () => gracefulShutdown());
+
     } catch (err) {
         logger.error('Error starting server:', err);
+        process.exit(1);
+    }
+};
+
+/**
+ * Perform graceful shutdown
+ */
+const gracefulShutdown = async () => {
+    logger.info('Graceful shutdown initiated...');
+
+    try {
+        await fastify.close();
+        logger.info('Server shutdown complete');
+        process.exit(0);
+    } catch (err) {
+        logger.error('Error during shutdown:', err);
         process.exit(1);
     }
 };
