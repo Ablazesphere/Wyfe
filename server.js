@@ -33,7 +33,13 @@ setupReminderCallRoutes(fastify);
 
 // Health check route
 fastify.get('/health', async (request, reply) => {
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    return {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        services: {
+            reminder: reminderConfig.FOLLOWUP_ENABLED ? 'enabled' : 'disabled'
+        }
+    };
 });
 
 // Start the server and initialize services
@@ -54,7 +60,7 @@ const startServer = async () => {
         // Start the server
         await fastify.listen({ port: config.PORT, host: '0.0.0.0' })
             .then(() => {
-                logger.info(`Wyfe server is listening on port ${config.PORT}`);
+                logger.info(`AI Reminder System server is listening on port ${config.PORT || 5050}`);
             });
     } catch (err) {
         logger.error('Error starting server:', err);

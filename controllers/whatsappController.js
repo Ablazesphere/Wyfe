@@ -1,7 +1,13 @@
-// controllers/whatsappController.js - Handle WhatsApp webhooks and message processing
+// controllers/whatsappController.js - Handle WhatsApp webhooks with follow-up support
 
 import { logger } from '../utils/logger.js';
-import { processUserMessage } from '../services/nlpService.js';
+import {
+    processUserMessage,
+    processFollowUpMessage,
+    isInFollowUpMode,
+    getNextFollowUpQuestion,
+    clearConversationState
+} from '../services/nlpService.js';
 import { sendWhatsAppMessage } from '../services/whapiService.js';
 
 /**
@@ -50,16 +56,12 @@ export function setupWhatsAppRoutes(fastify) {
                                 if (message.type === 'text') {
                                     const userPhoneNumber = change.value.contacts[0]?.wa_id;
                                     const messageContent = message.text.body;
+                                    const messageId = message.id;
 
                                     logger.info(`WhatsApp message from ${userPhoneNumber}: ${messageContent}`);
 
-                                    // Process the message with NLP
-                                    const nlpResult = await processUserMessage(messageContent, userPhoneNumber);
-
-                                    // Send response back to the user
-                                    await sendWhatsAppMessage(userPhoneNumber, nlpResult.response);
-
-                                    // No need to do anything else for now, we'll handle reminder creation in the NLP service
+                                    // Handle the message
+                                    await handleWhatsAppMessage(userPhoneNumber, messageContent, messageId);
                                 }
                             }
                         }
@@ -75,4 +77,99 @@ export function setupWhatsAppRoutes(fastify) {
             return reply.code(200).send('Error processed');
         }
     });
+}
+
+/**
+ * Handle an incoming WhatsApp message
+ * @param {string} userPhoneNumber The user's phone number
+ * @param {string} messageContent The message content
+ * @param {string} messageId The message ID
+ */
+async function handleWhatsAppMessage(userPhoneNumber, messageContent, messageId) {
+    try {
+        // Mark message as read first
+        try {
+            await markMessageAsRead(messageId);
+        } catch (error) {
+            logger.error('Error marking message as read:', error);
+            // Continue processing even if marking as read fails
+        }
+
+        let response;
+
+        // Check if this is a follow-up to a pending conversation
+        if (isInFollowUpMode(userPhoneNumber)) {
+            logger.info(`Processing follow-up message from ${userPhoneNumber}`);
+            response = await processFollowUpMessage(messageContent, userPhoneNumber);
+
+            // Send response
+            await sendWhatsAppMessage(userPhoneNumber, response.response);
+
+            // If there are more missing fields, send the next question
+            if (response.inFollowUpMode && response.nextQuestion) {
+                // Add a small delay to make conversation feel more natural
+                setTimeout(async () => {
+                    await sendWhatsAppMessage(userPhoneNumber, response.nextQuestion);
+                }, 1000);
+            } else if (response.complete) {
+                // All fields completed, send a final confirmation
+                if (response.scheduledTime) {
+                    const scheduledTimeMessage = `Your reminder is set for: ${response.scheduledTime}`;
+
+                    // Add a small delay to make conversation feel more natural
+                    setTimeout(async () => {
+                        await sendWhatsAppMessage(userPhoneNumber, scheduledTimeMessage);
+                    }, 1000);
+                }
+            }
+        } else {
+            // Process the message with NLP
+            response = await processUserMessage(messageContent, userPhoneNumber);
+
+            // Send the initial response
+            await sendWhatsAppMessage(userPhoneNumber, response.response);
+
+            // If we need follow-up questions, send the first one
+            if (response.inFollowUpMode && response.missingFields && response.missingFields.length > 0) {
+                const firstField = response.missingFields[0];
+                const followUpQuestion = response.followUpQuestions[firstField] ||
+                    `Please provide the ${firstField}:`;
+
+                // Add a small delay to make conversation feel more natural
+                setTimeout(async () => {
+                    await sendWhatsAppMessage(userPhoneNumber, followUpQuestion);
+                }, 1000);
+            }
+        }
+    } catch (error) {
+        logger.error(`Error handling WhatsApp message from ${userPhoneNumber}:`, error);
+
+        // Send an error message to the user
+        try {
+            await sendWhatsAppMessage(
+                userPhoneNumber,
+                "I'm sorry, I encountered an issue processing your request. Could you please try again?"
+            );
+
+            // Clear any conversation state to avoid getting stuck
+            clearConversationState(userPhoneNumber);
+        } catch (sendError) {
+            logger.error(`Error sending error message to ${userPhoneNumber}:`, sendError);
+        }
+    }
+}
+
+/**
+ * Mark a WhatsApp message as read
+ * @param {string} messageId Message ID
+ */
+async function markMessageAsRead(messageId) {
+    try {
+        // Import whapiService on-demand to avoid circular dependencies
+        const { markMessageAsRead } = await import('../services/whapiService.js');
+        return await markMessageAsRead(messageId);
+    } catch (error) {
+        logger.error(`Error marking message ${messageId} as read:`, error);
+        throw error;
+    }
 }
