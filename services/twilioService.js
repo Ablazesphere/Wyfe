@@ -1,4 +1,4 @@
-// services/twilioService.js - Simplified for general chatbot
+// services/twilioService.js - Updated for reminder functionality
 
 import { logger } from '../utils/logger.js';
 import {
@@ -7,7 +7,9 @@ import {
     sendInitialConversation,
     truncateAssistantResponse,
     sendAudioBuffer,
-    closeConnection
+    closeConnection,
+    parseReminderIntent,
+    processReminderIntent
 } from './openaiService.js';
 
 /**
@@ -17,6 +19,15 @@ import {
  */
 export function setupMediaStreamHandler(connection, req) {
     logger.info('Client connected');
+
+    // Check if this is a reminder call
+    const reminderContext = req.reminderContext || null;
+    if (reminderContext) {
+        logger.info('Handling reminder call', {
+            reminderId: reminderContext.reminderId,
+            content: reminderContext.reminderContent
+        });
+    }
 
     // Connection-specific state
     const state = {
@@ -29,7 +40,9 @@ export function setupMediaStreamHandler(connection, req) {
         currentUserTranscript: '',
         lastTranscriptId: null,
         callerPhoneNumber: null,
-        currentAssistantResponse: ''
+        currentAssistantResponse: '',
+        reminderContext: reminderContext,
+        reminderIntentProcessed: false
     };
 
     // Extract caller phone number if available
@@ -76,6 +89,26 @@ export function setupMediaStreamHandler(connection, req) {
         }
     };
 
+    // Process reminder-specific actions based on user transcript
+    const processReminderActions = async (transcript) => {
+        if (!state.reminderContext || state.reminderIntentProcessed) {
+            return;
+        }
+
+        // Parse intent from transcript
+        const intent = parseReminderIntent(transcript, state.reminderContext);
+
+        // If we detected a clear intent, process it
+        if (intent.intent !== 'unknown') {
+            const result = await processReminderIntent(intent);
+
+            // Mark as processed to avoid duplicates
+            state.reminderIntentProcessed = true;
+
+            logger.info('Processed reminder intent', result);
+        }
+    };
+
     // Setup OpenAI WebSocket event handlers
     openAiWs.on('message', (data) => {
         try {
@@ -98,6 +131,12 @@ export function setupMediaStreamHandler(connection, req) {
             if (response.type === 'conversation.item.input_audio_transcription.completed') {
                 if (response.transcript) {
                     logger.userMessage(response.transcript);
+
+                    // For reminder calls, process any actions based on transcript
+                    if (state.reminderContext) {
+                        processReminderActions(response.transcript);
+                    }
+
                     state.currentUserTranscript = '';
                 }
             }
@@ -149,10 +188,10 @@ export function setupMediaStreamHandler(connection, req) {
 
                     // Initialize the session
                     if (!state.sessionInitialized) {
-                        initializeSession(openAiWs)
+                        initializeSession(openAiWs, { reminderContext: state.reminderContext })
                             .then(() => {
                                 state.sessionInitialized = true;
-                                sendInitialConversation(openAiWs);
+                                sendInitialConversation(openAiWs, { reminderContext: state.reminderContext });
                             })
                             .catch(err => logger.error('Failed to initialize session:', err));
                     }

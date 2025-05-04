@@ -1,8 +1,9 @@
-// services/openaiService.js - Simplified for general chatbot
+// services/openaiService.js - Updated for reminder context
 
 import WebSocket from 'ws';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
+import { updateReminderStatus } from './reminderService.js';
 
 /**
  * Create a new OpenAI connection
@@ -32,15 +33,34 @@ export function closeConnection(connection) {
 /**
  * Initialize a session with OpenAI
  * @param {WebSocket} openAiWs The OpenAI WebSocket
+ * @param {Object} options Session options including reminderContext
  * @returns {Promise} Resolves when session is initialized
  */
-export function initializeSession(openAiWs) {
+export function initializeSession(openAiWs, options = {}) {
     return new Promise((resolve, reject) => {
-        // For a general chatbot, we can use a simpler system message
-        const systemInstructions = `You are a helpful, friendly voice assistant designed to have 
-        natural conversations with users. Respond in a conversational, warm manner. Keep responses 
-        concise and engaging. You can discuss a wide range of topics including answering questions, 
-        providing information, having casual conversation, telling jokes, or discussing ideas.`;
+        let systemInstructions = config.SYSTEM_MESSAGE_BASE;
+
+        // If this is a reminder call, customize the system instructions
+        if (options.reminderContext) {
+            const { reminderContent } = options.reminderContext;
+
+            systemInstructions = `You are an AI voice assistant making a scheduled reminder call. 
+            Your task is to remind the person about: "${reminderContent}".
+            
+            CONVERSATION FLOW:
+            1. Start by identifying yourself as an AI assistant making a reminder call.
+            2. Clearly deliver the reminder content.
+            3. Ask if they'd like to mark the reminder as completed or would prefer to be reminded again later.
+            4. If they want to mark it as completed, thank them and confirm it's marked as done.
+            5. If they want to be reminded later, ask when they'd like to be reminded again and confirm the new time.
+            6. If they don't provide a clear response, ask again politely.
+            7. Keep the conversation natural and friendly but on-topic about this specific reminder.
+
+            VOICE INSTRUCTIONS (Important - follow these exactly):
+            Voice: Speak in a warm, professional tone with a natural conversational cadence.
+            Tone: Be supportive, clear, and direct, with appropriate enthusiasm about helping them remember this task.
+            Pronunciation: Speak clearly and expressively, with good rhythm and appropriate emphasis.`;
+        }
 
         const sessionUpdate = {
             type: 'session.update',
@@ -59,7 +79,7 @@ export function initializeSession(openAiWs) {
             }
         };
 
-        logger.info('Sending session update');
+        logger.info('Sending session update', { isReminderContext: !!options.reminderContext });
 
         if (openAiWs.readyState === WebSocket.OPEN) {
             openAiWs.send(JSON.stringify(sessionUpdate));
@@ -80,9 +100,18 @@ export function initializeSession(openAiWs) {
 /**
  * Send initial conversation item to start the interaction
  * @param {WebSocket} openAiWs OpenAI WebSocket
+ * @param {Object} options Options including reminderContext
  */
-export function sendInitialConversation(openAiWs) {
+export function sendInitialConversation(openAiWs, options = {}) {
     if (openAiWs.readyState !== WebSocket.OPEN) return;
+
+    let initialText = 'Greet the user with a friendly hello and ask how you can help them today.';
+
+    // If this is a reminder call, customize the initial message
+    if (options.reminderContext) {
+        const { reminderContent } = options.reminderContext;
+        initialText = `Start the reminder call by introducing yourself as an AI assistant making a scheduled reminder call about ${reminderContent}.`;
+    }
 
     const initialConversationItem = {
         type: 'conversation.item.create',
@@ -92,13 +121,13 @@ export function sendInitialConversation(openAiWs) {
             content: [
                 {
                     type: 'input_text',
-                    text: 'Greet the user with a friendly hello and ask how you can help them today.'
+                    text: initialText
                 }
             ]
         }
     };
 
-    logger.info('Sending initial conversation item');
+    logger.info('Sending initial conversation item', { isReminderContext: !!options.reminderContext });
     openAiWs.send(JSON.stringify(initialConversationItem));
 
     // Request immediate response
@@ -141,4 +170,111 @@ export function sendAudioBuffer(openAiWs, audioData) {
     };
 
     openAiWs.send(JSON.stringify(audioAppend));
+}
+
+/**
+ * Parse user intent from conversation for reminder calls
+ * @param {string} transcript User's transcript
+ * @param {Object} reminderContext Reminder context
+ * @returns {Object} Parsed intent
+ */
+export function parseReminderIntent(transcript, reminderContext) {
+    // Simple intent detection for reminders
+    const lowerTranscript = transcript.toLowerCase();
+
+    // Check for completion intent
+    if (
+        lowerTranscript.includes('complete') ||
+        lowerTranscript.includes('done') ||
+        lowerTranscript.includes('finished') ||
+        lowerTranscript.includes('mark as complete') ||
+        lowerTranscript.includes('completed')
+    ) {
+        return {
+            intent: 'complete',
+            reminderId: reminderContext.reminderId
+        };
+    }
+
+    // Check for snooze/reschedule intent
+    if (
+        lowerTranscript.includes('remind me later') ||
+        lowerTranscript.includes('snooze') ||
+        lowerTranscript.includes('reschedule') ||
+        lowerTranscript.includes('later')
+    ) {
+        // Try to extract a time reference (simple approach)
+        const timeMatches = lowerTranscript.match(/(\d+)\s*(hour|minute|min|hr)/);
+        const timeAmount = timeMatches ? parseInt(timeMatches[1], 10) : 30;
+        const timeUnit = timeMatches ?
+            timeMatches[2].startsWith('h') ? 'hours' : 'minutes' :
+            'minutes';
+
+        return {
+            intent: 'snooze',
+            reminderId: reminderContext.reminderId,
+            snoozeAmount: timeAmount,
+            snoozeUnit: timeUnit
+        };
+    }
+
+    // Default is no specific intent detected
+    return {
+        intent: 'unknown',
+        reminderId: reminderContext.reminderId
+    };
+}
+
+/**
+ * Process reminder response based on intent
+ * @param {Object} intent The detected intent
+ * @returns {Promise<Object>} Processing result
+ */
+export async function processReminderIntent(intent) {
+    try {
+        switch (intent.intent) {
+            case 'complete':
+                // Mark reminder as completed
+                await updateReminderStatus(intent.reminderId, 'completed', {
+                    completedAt: new Date(),
+                    completionMethod: 'call'
+                });
+
+                logger.info(`Marked reminder ${intent.reminderId} as completed`);
+                return { success: true, message: 'Reminder marked as completed' };
+
+            case 'snooze':
+                // Calculate new scheduled time
+                const now = new Date();
+                let snoozedTime = new Date(now);
+
+                if (intent.snoozeUnit === 'hours') {
+                    snoozedTime.setHours(now.getHours() + intent.snoozeAmount);
+                } else {
+                    snoozedTime.setMinutes(now.getMinutes() + intent.snoozeAmount);
+                }
+
+                // Update reminder with new scheduled time
+                await updateReminderStatus(intent.reminderId, 'snoozed', {
+                    previousScheduledTime: now,
+                    scheduledTime: snoozedTime,
+                    snoozeAmount: intent.snoozeAmount,
+                    snoozeUnit: intent.snoozeUnit
+                });
+
+                logger.info(`Snoozed reminder ${intent.reminderId} for ${intent.snoozeAmount} ${intent.snoozeUnit}`);
+                return {
+                    success: true,
+                    message: `Reminder snoozed for ${intent.snoozeAmount} ${intent.snoozeUnit}`,
+                    snoozedTime
+                };
+
+            default:
+                logger.info(`No specific intent detected for reminder ${intent.reminderId}`);
+                return { success: false, message: 'No action taken' };
+        }
+    } catch (error) {
+        logger.error(`Error processing reminder intent for ${intent.reminderId}:`, error);
+        return { success: false, message: 'Error processing intent', error: error.message };
+    }
 }
