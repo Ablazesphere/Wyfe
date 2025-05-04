@@ -1,4 +1,4 @@
-// server.js - Main entry point
+// server.js - Main entry point with fixed time update handling
 import Fastify from 'fastify';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
@@ -38,7 +38,7 @@ fastify.get('/health', async (request, reply) => {
 // Start the server
 const startServer = async () => {
     try {
-        await fastify.listen({ port: config.PORT })
+        await fastify.listen({ port: config.PORT, host: '0.0.0.0' })
             .then(() => {
                 logger.info(`Server is listening on port ${config.PORT}`);
 
@@ -58,13 +58,16 @@ const startServer = async () => {
                 }
             });
 
-        // Periodically refresh the greeting audio cache
+        // Periodically refresh the greeting audio cache, but less frequently
         if (config.GREETING_PRELOAD_ENABLED) {
+            // Refresh every 2 hours instead of using config.GREETING_CACHE_TTL
+            const REFRESH_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
+
             setInterval(() => {
                 preloadGreetingAudio()
                     .then(() => logger.debug('Refreshed greeting audio cache'))
                     .catch(err => logger.warn('Failed to refresh greeting cache:', err));
-            }, config.GREETING_CACHE_TTL); // Refresh based on configured TTL
+            }, REFRESH_INTERVAL);
         }
 
         // Handle graceful shutdown
